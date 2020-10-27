@@ -18,6 +18,6 @@ Other examples:
 
 ## Requirements
 - Python 3
-- (Vapoursynth)[http://www.vapoursynth.com/] R45+
-- (ffms2)[https://github.com/FFMS/ffms2] or (lsmash)[https://github.com/VFR-maniac/L-SMASH-Works]
-- (mkvmerge)[https://mkvtoolnix.download/]
+- [Vapoursynth](http://www.vapoursynth.com/) R45+
+- [ffms2](https://github.com/FFMS/ffms2) or [lsmash](https://github.com/VFR-maniac/L-SMASH-Works)
+- [mkvmerge](https://mkvtoolnix.download/)
