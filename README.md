@@ -14,7 +14,7 @@ Simple 2 pass encode:
 
 Other examples:  
 ```aomenc-by-gop -i input.mkv --workers 6 --kf-max-dist=120 --threads=8 --cpu-used=6 out.webm```  
-```aomenc-by-gop -i input.mkv -s 100 -e 200 --threads=8 --cpu-used=6 out.mkv```
+```aomenc-by-gop -i input.mkv -s 100 -e 200 --threads=8 --cpu-used=6 out.mkv```  
 ```aomenc-by-gop -i script.vpy -s 100 -e 200 --threads=8 --cpu-used=6 out.mkv```
 
 ## Requirements
