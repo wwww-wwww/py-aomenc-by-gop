@@ -267,6 +267,61 @@ def require_exec(file, default=None):
   return path
 
 
+def parse_args(args):
+  args.input = os.path.abspath(args.input)
+  args.workers = int(args.workers)
+  args.passes = int(args.passes)
+  args.kf_max_dist = int(args.kf_max_dist)
+  args.min_dist = 24
+
+  print("Max workers:", args.workers)
+  print("Passes:", args.passes)
+
+  core = vapoursynth.get_core()
+
+  args.vpy = os.path.splitext(args.input)[1] == ".vpy"
+  if args.vpy:
+    script = open(args.input, "r").read()
+    exec(script)
+    video = vapoursynth.get_output()
+  else:
+    if args.use:
+      source_filter = get_attr(core, args.use, True)
+    else:
+      args.use, source_filter = get_source_filter(core)
+      print("Using {} as source filter".format(args.use))
+
+    if os.path.exists(args.output) and not args.y:
+      try:
+        overwrite = input("{} already exists. Overwrite? [y/N] ".format(
+          args.output))
+      except KeyboardInterrupt:
+        print("Not overwriting, exiting.")
+        exit(0)
+
+      if overwrite.lower().strip() != "y":
+        print("Not overwriting, exiting.")
+        exit(0)
+
+    video = source_filter(args.input)
+
+  num_frames = video.num_frames
+
+  args.start = int(args.start or 0)
+  args.end = int(args.end or num_frames - 1)
+
+  if args.end:
+    if args.end >= num_frames or (args.start and args.end < args.start):
+      raise Exception("End frame out of bounds")
+
+  args.num_frames = args.end - args.start + 1
+
+  args.working_dir = tempfile.mkdtemp(dir=os.getcwd())
+  print("Working directory:", args.working_dir)
+
+  print(str(video))
+
+
 def main():
   import sys
 
@@ -300,81 +355,48 @@ def main():
   parser.add_argument("--help", action="help")
 
   args, aom_args = parser.parse_known_args()
-  args.input = os.path.abspath(args.input)
-  args.workers = int(args.workers)
-  args.passes = int(args.passes)
-  args.kf_max_dist = int(args.kf_max_dist)
-  args.vspipe = vspipe
-  args.aomenc = aomenc
-  min_dist = 24
 
   print("aomenc:", aomenc)
   print("vspipe:", vspipe)
   print("mkvmerge:", mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
-  print("Max workers:", args.workers)
-  print("Passes:", args.passes)
 
-  core = vapoursynth.get_core()
-
-  if args.use:
-    source_filter = get_attr(core, args.use, True)
-  else:
-    args.use, source_filter = get_source_filter(core)
-    print("Using {} as source filter".format(args.use))
-
-  if os.path.exists(args.output) and not args.y:
-    try:
-      overwrite = input("{} already exists. Overwrite? [y/N] ".format(
-        args.output))
-    except KeyboardInterrupt:
-      print("Not overwriting, exiting.")
-      exit(0)
-
-    if overwrite.lower().strip() != "y":
-      print("Not overwriting, exiting.")
-      exit(0)
-
-  video = source_filter(args.input)
-  num_frames = video.num_frames
-
-  args.start = int(args.start or 0)
-  args.end = int(args.end or num_frames - 1)
-
-  if args.end:
-    if args.end >= num_frames or (args.start and args.end < args.start):
-      raise Exception("End frame out of bounds")
-
-  args.working_dir = tempfile.mkdtemp(dir=os.getcwd())
-  print("Working directory:", args.working_dir)
-
-  print(str(video))
-
-  num_frames = args.end - args.start + 1
+  parse_args(args)
+  args.vspipe = vspipe
+  args.aomenc = aomenc
 
   completed_frames = Counter()
-  progress_bar = tqdm(total=num_frames, unit="fr")
+  progress_bar = tqdm(total=args.num_frames, unit="fr")
 
-  script = "from vapoursynth import core\n" \
-           "core.{}(r\"{}\").set_output()".format(args.use, args.input)
+  if args.vpy:
+    script_name = args.input
 
-  script_name = os.path.join(args.working_dir, "video.vpy")
+    script_gop = """import vapoursynth
+exec(open(r"{}", "r").read())
+v = vapoursynth.get_output()
+vapoursynth.get_core().fmtc.bitdepth(v, bits=8).set_output()"""
+    script_gop = script_gop.format(args.input)
+  else:
+    script = "from vapoursynth import core\n" \
+            "core.{}(r\"{}\").set_output()".format(args.use, args.input)
 
-  script2 = """from vapoursynth import core
+    script_name = os.path.join(args.working_dir, "video.vpy")
+
+    with open(script_name, "w+") as script_f:
+      script_f.write(script)
+
+    script_gop = """from vapoursynth import core
 v = core.{}(r\"{}\")
 w = int(v.width / 1.5) + (1 if int(v.width / 1.5) % 2 == 1 else 0)
 h = int(v.height / 1.5) + (1 if int(v.height / 1.5) % 2 == 1 else 0)
 resized = core.resize.Bilinear(v, width=w, height=h)
 core.fmtc.bitdepth(resized, bits=8).set_output()"""
-  script2 = script2.format(args.use, args.input)
+    script_gop = script_gop.format(args.use, args.input)
 
   script_name_gop = os.path.join(args.working_dir, "gop.vpy")
 
-  with open(script_name, "w+") as script_f:
-    script_f.write(script)
-
   with open(script_name_gop, "w+") as script_f:
-    script_f.write(script2)
+    script_f.write(script_gop)
 
   queue = Queue(args.start)
   workers = []
@@ -383,7 +405,7 @@ core.fmtc.bitdepth(resized, bits=8).set_output()"""
   def update():
     active_workers = [worker for worker in workers if worker.pipe != None]
     s = "queue: {} workers: {}".format(len(queue.queue), len(active_workers))
-    if frame < num_frames:
+    if frame < args.num_frames:
       s = "fp: {} ".format(frame) + s
     progress_bar.set_description(s)
 
@@ -442,17 +464,17 @@ core.fmtc.bitdepth(resized, bits=8).set_output()"""
               start += int(length / 2)
               queue.submit(start, frame - 1, counter.inc())
               start = frame
-            elif length > min_dist:
+            elif length > args.min_dist:
               queue.submit(start, frame - 1, counter.inc())
               start = frame
           else:
             update()
 
     if pipe.returncode == 0:
-      if num_frames > start:
-        queue.submit(start, num_frames - 1, counter.inc())
+      if args.num_frames > start:
+        queue.submit(start, args.num_frames - 1, counter.inc())
 
-      frame = num_frames
+      frame = args.num_frames
       update()
 
       queue.wait_empty()
@@ -479,8 +501,10 @@ core.fmtc.bitdepth(resized, bits=8).set_output()"""
           fpf = os.path.splitext(segment)[0] + ".log"
           os.remove(fpf)
 
-      os.remove(script_name)
-      os.remove(script_name_gop)
+      if not args.vpy:
+        os.remove(script_name)
+        os.remove(script_name_gop)
+
       os.rmdir(args.working_dir)
 
       print("completed")
