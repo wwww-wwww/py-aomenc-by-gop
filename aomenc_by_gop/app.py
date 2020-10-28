@@ -1,4 +1,4 @@
-import subprocess, os, sys, vapoursynth, re, traceback, argparse, platform, shutil
+import subprocess, os, sys, vapoursynth, re, traceback, argparse, platform, shutil, tempfile
 from threading import Thread, Lock, Condition, Event
 from collections import deque
 from tqdm import tqdm
@@ -89,15 +89,24 @@ class Worker:
       str(segment[1])
     ]
 
+    segment_output = os.path.join(self.args.working_dir,
+                                  "segment_{}.ivf".format(segment[2]))
+
     aomenc_cmd = [
-      self.args.aomenc, "-", "--ivf", "-o", "segment_{}.ivf".format(
-        segment[2]), "--passes={}".format(self.passes)
+      self.args.aomenc,
+      "-",
+      "--ivf",
+      "-o",
+      segment_output,
+      "--passes={}".format(self.passes),
     ] + self.aom_args
 
     for p in range(self.passes):
       pass_cmd = aomenc_cmd + ["--pass={}".format(p + 1)]
       if self.passes == 2:
-        pass_cmd.append("--fpf=segment_{}.log".format(segment[2]))
+        segment_fpf = os.path.join(self.args.working_dir,
+                                   "segment_{}.log".format(segment[2]))
+        pass_cmd.append("--fpf={}".format(segment_fpf))
 
       self.vspipe = subprocess.Popen(vspipe_cmd,
                                      stdout=subprocess.PIPE,
@@ -119,18 +128,19 @@ class Worker:
         while True:
           line = self.pipe.stdout.readline().strip()
 
-          s_output.append(line)
           if len(line) == 0 and self.pipe.poll() is not None:
             break
 
-          match = re.match(re_aom_frame, line)
-          if match:
-            current_pass = int(match.group(1))
-            if current_pass == self.passes:
-              new_frame = int(match.group(2))
-              if new_frame > frame:
-                self.update(new_frame - frame)
-                frame = new_frame
+          if len(line) > 0:
+            s_output.append(line)
+            match = re.match(re_aom_frame, line)
+            if match:
+              current_pass = int(match.group(1))
+              if current_pass == self.passes:
+                new_frame = int(match.group(2))
+                if new_frame > frame:
+                  self.update(new_frame - frame)
+                  frame = new_frame
 
         if self.pipe.returncode != 0:
           if self.stopped: return
@@ -160,9 +170,13 @@ class Worker:
       self.pipe.kill()
 
 
-def concat(mkvmerge, n_segments, output):
+def concat(mkvmerge, working_dir, n_segments, output):
   print("\nconcatenating")
   segments = ["segment_{}.ivf".format(n + 1) for n in range(n_segments)]
+  segments = [os.path.join(working_dir, segment) for segment in segments]
+
+  if any(not os.path.exists(segment) for segment in segments):
+    raise Exception("Segment {} is missing".format(segment))
 
   if platform.system() == "Linux":
     import resource
@@ -172,24 +186,24 @@ def concat(mkvmerge, n_segments, output):
     file_limit = -1
     cmd_limit = 32767
 
-  out = _concat(mkvmerge, segments, output, file_limit, cmd_limit)
+  out = _concat(mkvmerge, working_dir, segments, output, file_limit, cmd_limit)
   os.replace(out, output)
-
-  # remove temporary files used by recursive concat
-  if os.path.exists("{}.tmp0.mkv".format(output)):
-    os.remove("{}.tmp0.mkv".format(output))
-
-  if os.path.exists("{}.tmp1.mkv".format(output)):
-    os.remove("{}.tmp1.mkv".format(output))
+  return segments
 
 
-def _concat(mkvmerge, files, output, file_limit, cmd_limit, flip=False):
-  tmp_out = "{}.tmp{}.mkv".format(output, int(flip))
+def _concat(mkvmerge,
+            working_dir,
+            files,
+            output,
+            file_limit,
+            cmd_limit,
+            flip=False):
+  tmp_out = os.path.join(working_dir, "{}.tmp{}.mkv".format(output, int(flip)))
   cmd = [mkvmerge, "-o", tmp_out, files[0]]
 
   remaining = []
   for i, file in enumerate(files[1:]):
-    new_cmd = cmd + ['+{}'.format(file)]
+    new_cmd = cmd + ["+{}".format(file)]
     if sum(len(s) for s in new_cmd) < cmd_limit \
         and (file_limit == -1 or i < max(1, file_limit - 10)):
       cmd = new_cmd
@@ -208,8 +222,8 @@ def _concat(mkvmerge, files, output, file_limit, cmd_limit, flip=False):
     raise Exception
 
   if len(remaining) > 0:
-    return _concat(mkvmerge, [tmp_out] + remaining, output, file_limit,
-                   cmd_limit, not flip)
+    return _concat(mkvmerge, working_dir, [tmp_out] + remaining, output,
+                   file_limit, cmd_limit, not flip)
   else:
     return tmp_out
 
@@ -286,6 +300,7 @@ def main():
   parser.add_argument("--help", action="help")
 
   args, aom_args = parser.parse_known_args()
+  args.input = os.path.abspath(args.input)
   args.workers = int(args.workers)
   args.passes = int(args.passes)
   args.kf_max_dist = int(args.kf_max_dist)
@@ -297,8 +312,8 @@ def main():
   print("vspipe:", vspipe)
   print("mkvmerge:", mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
-  print("max workers:", args.workers)
-  print("passes:", args.passes)
+  print("Max workers:", args.workers)
+  print("Passes:", args.passes)
 
   core = vapoursynth.get_core()
 
@@ -314,14 +329,17 @@ def main():
     args.o = "{}_aom.mkv".format(os.path.join(dirname, filename))
 
   if os.path.exists(args.o) and not args.y:
-    overwrite = input("{} already exists. Overwrite? [y/N] ".format(args.o))
+    try:
+      overwrite = input("{} already exists. Overwrite? [y/N] ".format(args.o))
+    except KeyboardInterrupt:
+      print("Not overwriting, exiting.")
+      exit(0)
+
     if overwrite.lower().strip() != "y":
       print("Not overwriting, exiting.")
       exit(0)
 
   video = source_filter(args.input)
-  print(str(video))
-
   num_frames = video.num_frames
 
   args.start = int(args.start or 0)
@@ -331,6 +349,11 @@ def main():
     if args.end >= num_frames or (args.start and args.end < args.start):
       raise Exception("End frame out of bounds")
 
+  args.working_dir = tempfile.mkdtemp(dir=os.getcwd())
+  print("Working directory:", args.working_dir)
+
+  print(str(video))
+
   num_frames = args.end - args.start + 1
 
   completed_frames = Counter()
@@ -339,7 +362,7 @@ def main():
   script = "from vapoursynth import core\n" \
            "core.{}(r\"{}\").set_output()".format(args.use, args.input)
 
-  script_name = "{}.vpy".format(os.path.basename(args.input))
+  script_name = os.path.join(args.working_dir, "video.vpy")
 
   script2 = """from vapoursynth import core
 v = core.{}(r\"{}\")
@@ -349,12 +372,12 @@ resized = core.resize.Bilinear(v, width=w, height=h)
 core.fmtc.bitdepth(resized, bits=8).set_output()"""
   script2 = script2.format(args.use, args.input)
 
-  script_name2 = "{}_gop.vpy".format(os.path.basename(args.input))
+  script_name_gop = os.path.join(args.working_dir, "gop.vpy")
 
   with open(script_name, "w+") as script_f:
     script_f.write(script)
 
-  with open(script_name2, "w+") as script_f:
+  with open(script_name_gop, "w+") as script_f:
     script_f.write(script2)
 
   queue = Queue(args.start)
@@ -377,7 +400,7 @@ core.fmtc.bitdepth(resized, bits=8).set_output()"""
       Worker(args, queue, aom_args, args.passes, script_name,
              progress_bar.update, update))
 
-  get_gop = [vspipe, script_name2, "-", "-y"]
+  get_gop = [vspipe, script_name_gop, "-", "-y"]
 
   if args.start:
     get_gop.extend(["-s", str(args.start)])
@@ -407,26 +430,27 @@ core.fmtc.bitdepth(resized, bits=8).set_output()"""
       if len(line) == 0 and pipe.poll() is not None:
         break
 
-      output_log.append(line)
-      match = re.match(re_keyframe, line)
-      if match:
-        frame = int(match.group(1))
-        frame_type = int(match.group(2))
-        length = frame - start
-        if length - args.kf_max_dist > args.kf_max_dist:
-          queue.submit(start, start + args.kf_max_dist - 1, counter.inc())
-          start += args.kf_max_dist
-        elif frame_type == 1:
-          if length > args.kf_max_dist:
-            queue.submit(start, start + int(length / 2) - 1, counter.inc())
-            start += int(length / 2)
-            queue.submit(start, frame - 1, counter.inc())
-            start = frame
-          elif length > min_dist:
-            queue.submit(start, frame - 1, counter.inc())
-            start = frame
-        else:
-          update()
+      if len(line) > 0:
+        output_log.append(line)
+        match = re.match(re_keyframe, line)
+        if match:
+          frame = int(match.group(1))
+          frame_type = int(match.group(2))
+          length = frame - start
+          if length - args.kf_max_dist > args.kf_max_dist:
+            queue.submit(start, start + args.kf_max_dist - 1, counter.inc())
+            start += args.kf_max_dist
+          elif frame_type == 1:
+            if length > args.kf_max_dist:
+              queue.submit(start, start + int(length / 2) - 1, counter.inc())
+              start += int(length / 2)
+              queue.submit(start, frame - 1, counter.inc())
+              start = frame
+            elif length > min_dist:
+              queue.submit(start, frame - 1, counter.inc())
+              start = frame
+          else:
+            update()
 
     if pipe.returncode == 0:
       if num_frames > start:
@@ -439,7 +463,31 @@ core.fmtc.bitdepth(resized, bits=8).set_output()"""
       for worker in workers:
         worker.working.wait()
 
-      concat(mkvmerge, counter.n, args.o)
+      segments = concat(mkvmerge, args.working_dir, counter.n, args.o)
+
+      # cleanup
+
+      # remove temporary files used by recursive concat
+      tmp_files = [
+        os.path.join(args.working_dir, "{}.tmp0.mkv".format(args.o)),
+        os.path.join(args.working_dir, "{}.tmp1.mkv".format(args.o))
+      ]
+
+      for file in tmp_files:
+        if os.path.exists(file):
+          os.remove(file)
+
+      for segment in segments:
+        os.remove(segment)
+        if args.passes == 2:
+          fpf = os.path.splitext(segment)[0] + ".log"
+          os.remove(fpf)
+
+      os.remove(script_name)
+      os.remove(script_name_gop)
+      os.rmdir(args.working_dir)
+
+      print("completed")
 
     else:
       print()
