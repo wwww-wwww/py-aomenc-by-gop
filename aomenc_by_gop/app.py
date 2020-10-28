@@ -284,14 +284,14 @@ def main():
     "onepass_keyframes", resource_filename("aomenc_by_gop", onepass_keyframes))
 
   parser = argparse.ArgumentParser(add_help=False)
-  parser.add_argument("input")
+  parser.add_argument("-i", "--input", required=True)
+  parser.add_argument("output")
   parser.add_argument("--workers", default=4)
   parser.add_argument("--passes", default=2)
   parser.add_argument("--kf-max-dist", default=240)
   parser.add_argument("-u",
                       "--use",
                       help="VS source filter (ex. lsmas.LWLibavSource)")
-  parser.add_argument("-o", default=None)
   parser.add_argument("-s", "--start", default=None, help="Input start frame")
   parser.add_argument("-e", "--end", default=None, help="Input end frame")
   parser.add_argument("-y",
@@ -323,14 +323,10 @@ def main():
     args.use, source_filter = get_source_filter(core)
     print("Using {} as source filter".format(args.use))
 
-  if not args.o:
-    filename = os.path.splitext(os.path.basename(args.input))[0]
-    dirname = os.path.dirname(args.input)
-    args.o = "{}_aom.mkv".format(os.path.join(dirname, filename))
-
-  if os.path.exists(args.o) and not args.y:
+  if os.path.exists(args.output) and not args.y:
     try:
-      overwrite = input("{} already exists. Overwrite? [y/N] ".format(args.o))
+      overwrite = input("{} already exists. Overwrite? [y/N] ".format(
+        args.output))
     except KeyboardInterrupt:
       print("Not overwriting, exiting.")
       exit(0)
@@ -463,14 +459,14 @@ core.fmtc.bitdepth(resized, bits=8).set_output()"""
       for worker in workers:
         worker.working.wait()
 
-      segments = concat(mkvmerge, args.working_dir, counter.n, args.o)
+      segments = concat(mkvmerge, args.working_dir, counter.n, args.output)
 
       # cleanup
 
       # remove temporary files used by recursive concat
       tmp_files = [
-        os.path.join(args.working_dir, "{}.tmp0.mkv".format(args.o)),
-        os.path.join(args.working_dir, "{}.tmp1.mkv".format(args.o))
+        os.path.join(args.working_dir, "{}.tmp0.mkv".format(args.output)),
+        os.path.join(args.working_dir, "{}.tmp1.mkv".format(args.output))
       ]
 
       for file in tmp_files:
