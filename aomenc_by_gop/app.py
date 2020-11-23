@@ -376,10 +376,10 @@ def main():
   if args.vpy:
     script_name = args.input
 
-    script_gop = """import vapoursynth
+    script_gop = """import vapoursynth as vs
 exec(open(r"{}", "r").read())
-v = vapoursynth.get_output()
-vapoursynth.get_core().fmtc.bitdepth(v, bits=8).set_output()"""
+v = vs.get_output()
+vs.core.resize.Point(v, format=vs.YUV420P8).set_output()"""
     script_gop = script_gop.format(args.input)
   else:
     script = "from vapoursynth import core\n" \
@@ -390,12 +390,12 @@ vapoursynth.get_core().fmtc.bitdepth(v, bits=8).set_output()"""
     with open(script_name, "w+") as script_f:
       script_f.write(script)
 
-    script_gop = """from vapoursynth import core
-v = core.{}(r\"{}\")
+    script_gop = """import vapoursynth as vs
+v = vs.core.{}(r\"{}\")
 w = int(v.width / 1.5) + (1 if int(v.width / 1.5) % 2 == 1 else 0)
 h = int(v.height / 1.5) + (1 if int(v.height / 1.5) % 2 == 1 else 0)
-resized = core.resize.Bilinear(v, width=w, height=h)
-core.fmtc.bitdepth(resized, bits=8).set_output()"""
+resized = vs.core.resize.Bilinear(v, width=w, height=h, format=vs.YUV420P8)
+resized.set_output()"""
     script_gop = script_gop.format(args.use, args.input)
 
   script_name_gop = os.path.join(args.working_dir, "gop.vpy")
