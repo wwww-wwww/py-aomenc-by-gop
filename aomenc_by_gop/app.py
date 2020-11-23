@@ -6,6 +6,11 @@ from tqdm import tqdm
 re_keyframe = r"frame *([0-9]+) *([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
 
+if hasattr(subprocess, "CREATE_NO_WINDOW"):
+  CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+else:
+  CREATE_NO_WINDOW = 0
+
 
 class Counter:
   def __init__(self):
@@ -111,7 +116,7 @@ class Worker:
       self.vspipe = subprocess.Popen(vspipe_cmd,
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL,
-                                     creationflags=subprocess.CREATE_NO_WINDOW)
+                                     creationflags=CREATE_NO_WINDOW)
 
       self.pipe = subprocess.Popen(pass_cmd,
                                    stdin=self.vspipe.stdout,
@@ -428,13 +433,13 @@ core.fmtc.bitdepth(resized, bits=8).set_output()"""
 
   vspipe_pipe = subprocess.Popen(get_gop,
                                  stdout=subprocess.PIPE,
-                                 creationflags=subprocess.CREATE_NO_WINDOW)
+                                 creationflags=CREATE_NO_WINDOW)
 
   pipe = subprocess.Popen(onepass_keyframes,
                           stdin=vspipe_pipe.stdout,
                           stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE,
-                          creationflags=subprocess.CREATE_NO_WINDOW)
+                          creationflags=CREATE_NO_WINDOW)
 
   counter = Counter()
 
