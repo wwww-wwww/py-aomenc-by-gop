@@ -20,5 +20,5 @@ Other examples:
 ## Requirements
 - Python 3
 - [Vapoursynth](http://www.vapoursynth.com/) R45+
-- [ffms2](https://github.com/FFMS/ffms2) or [lsmash](https://github.com/VFR-maniac/L-SMASH-Works)
+- [ffms2](https://github.com/FFMS/ffms2) or [lsmash](https://github.com/VFR-maniac/L-SMASH-Works) (Available via vsrepo on Windows [lsmas](http://vsdb.top/plugins/lsmas) [ffms2](http://vsdb.top/plugins/ffms2))
 - [mkvmerge](https://mkvtoolnix.download/)
