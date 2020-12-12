@@ -1,7 +1,5 @@
-import subprocess, os, sys, vapoursynth, re, traceback, argparse, platform, shutil, tempfile
+import subprocess, os, sys, vapoursynth, re, traceback, argparse, platform, shutil, tempfile, time
 from threading import Thread, Lock, Condition, Event
-from collections import deque
-from tqdm import tqdm
 
 re_keyframe = r"frame *([0-9]+) *([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
@@ -10,6 +8,14 @@ if hasattr(subprocess, "CREATE_NO_WINDOW"):
   CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 else:
   CREATE_NO_WINDOW = 0
+
+priorities = {
+  "-2": 0x00000040,
+  "-1": 0x00004000,
+  "0": 0x00000020,
+  "1": 0x00008000,
+  "2": 0x00000080,
+}
 
 
 class Counter:
@@ -29,7 +35,7 @@ class Counter:
 
 class Queue:
   def __init__(self, offset_start):
-    self.queue = deque()
+    self.queue = []
     self.lock = Lock()
     self.empty_lock = Lock()
     self.empty = Condition(self.empty_lock)
@@ -50,7 +56,7 @@ class Queue:
         if self.update:
           self.update()
         worker.working.clear()
-        pop = self.queue.pop()
+        pop = self.queue.pop(0)
         if len(self.queue) == 0:
           with self.not_empty_lock:
             self.not_empty.notify_all()
@@ -64,7 +70,8 @@ class Queue:
   def submit(self, start, end, i):
     segment = (self.offset_start + start, self.offset_start + end, i)
     with self.lock:
-      self.queue.appendleft(segment)
+      self.queue.append(segment)
+      self.queue.sort(key=lambda x: x[1] - x[0], reverse=True)
       if self.update:
         self.update()
       with self.empty_lock:
@@ -72,7 +79,8 @@ class Queue:
 
 
 class Worker:
-  def __init__(self, args, queue, aom_args, passes, script, update1, update2):
+  def __init__(self, args, queue, aom_args, passes, script, update1, update2,
+               priority):
     self.queue = queue
     self.args = args
     self.aom_args = aom_args
@@ -85,6 +93,7 @@ class Worker:
     self.working = Event()
     self.working.set()
     self.stopped = False
+    self.priority = priority
     Thread(target=self.loop, daemon=True).start()
 
   def encode(self, segment):
@@ -122,7 +131,8 @@ class Worker:
                                    stdin=self.vspipe.stdout,
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT,
-                                   universal_newlines=True)
+                                   universal_newlines=True,
+                                   creationflags=self.priority)
 
       self.update2()
 
@@ -173,6 +183,46 @@ class Worker:
       self.vspipe.kill()
     if self.pipe != None:
       self.pipe.kill()
+
+
+class Progress:
+  def __init__(self, total):
+    self.total = total
+    self.description = ""
+    self.n = 0
+    self.started = time.time()
+    self.last_line = ""
+
+  def update(self, n=None, description=None):
+    if description:
+      self.description = description
+
+    if n:
+      self.n += n
+
+    self.print()
+
+  def print(self):
+    elapsed = round(time.time() - self.started)
+    pct = int(self.n / self.total * 100)
+    fps = self.n / (elapsed or 1)
+    if fps < 1:
+      fps = f"{round(fps * 60, 2)}fpm"
+    else:
+      fps = f"{round(fps, 2)}fps"
+
+    line = " ".join([
+      self.description,
+      f"{pct}%",
+      f"{self.n}/{self.total}",
+      fps,
+      f"{int(elapsed / 60):02d}:{elapsed % 60:02d}",
+    ])
+
+    padding = " " * (len(self.last_line) - len(line))
+
+    self.last_line = line
+    print(line + padding, end="\r")
 
 
 def concat(mkvmerge, working_dir, n_segments, output):
@@ -357,6 +407,7 @@ def main():
   parser.add_argument("-y",
                       help="Skip warning / overwrite output",
                       action="store_true")
+  parser.add_argument("--priority", default=0, help="Process priority")
   parser.add_argument("--help", action="help")
 
   args, aom_args = parser.parse_known_args()
@@ -367,11 +418,12 @@ def main():
   print("onepass_keyframes:", onepass_keyframes)
 
   parse_args(args)
+  args.priority = priorities[str(args.priority)] if CREATE_NO_WINDOW else 0
   args.vspipe = vspipe
   args.aomenc = aomenc
 
   completed_frames = Counter()
-  progress_bar = tqdm(total=args.num_frames, unit="fr")
+  progress_bar = Progress(args.num_frames)
 
   if args.vpy:
     script_name = args.input
@@ -412,7 +464,7 @@ resized.set_output()"""
     s = "queue: {} workers: {}".format(len(queue.queue), len(active_workers))
     if frame < args.num_frames:
       s = "fp: {} ".format(frame) + s
-    progress_bar.set_description(s)
+    progress_bar.update(description=s)
 
   update()
 
@@ -421,7 +473,7 @@ resized.set_output()"""
   for i in range(args.workers):
     workers.append(
       Worker(args, queue, aom_args, args.passes, script_name,
-             progress_bar.update, update))
+             progress_bar.update, update, args.priority))
 
   get_gop = [vspipe, script_name_gop, "-", "-y"]
 
@@ -529,3 +581,5 @@ resized.set_output()"""
     pipe.kill()
     for worker in workers:
       worker.kill()
+
+    exit(0)

@@ -8,7 +8,7 @@ with open("requirements.txt") as fh:
 
 setup(
   name="aomenc-by-gop",
-  version="0.1.2",
+  version="0.1.5",
   author="wwwwwwww",
   author_email="wvvwvvvvwvvw@gmail.com",
   description="Aomenc by gop",
