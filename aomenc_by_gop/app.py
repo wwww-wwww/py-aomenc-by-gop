@@ -24,13 +24,11 @@ class Counter:
     self.n = 0
 
   def add(self, n):
-    with self.lock:
-      self.n += n
+    self.n += n
 
   def inc(self):
-    with self.lock:
-      self.n += 1
-      return self.n
+    self.n += 1
+    return self.n
 
 
 class Queue:
@@ -158,8 +156,11 @@ class Worker:
                   frame = new_frame
 
         if self.pipe.returncode != 0:
-          if self.stopped: return
+          if self.stopped: return False
+          self.update(-frame)
+          print(vspipe_cmd, "|", pass_cmd)
           print("\n" + "\n".join(s_output))
+          return False
       except:
         print(traceback.format_exc())
       finally:
@@ -169,11 +170,16 @@ class Worker:
         self.pipe = None
         self.update2()
 
+    return True
+
   def loop(self):
     while True:
       if self.stopped: return
       segment = self.queue.acquire(self)
-      if segment: self.encode(segment)
+      if segment:
+        for i in range(3):
+          if self.encode(segment): break
+
       self.working.set()
 
   def kill(self):
@@ -189,6 +195,7 @@ class Progress:
   def __init__(self, total):
     self.total = total
     self.description = ""
+    self.lock = Lock()
     self.n = 0
     self.started = time.time()
     self.last_line = ""
@@ -198,7 +205,10 @@ class Progress:
       self.description = description
 
     if n:
+      while not self.lock.acquire(timeout=1):
+        pass
       self.n += n
+      self.lock.release()
 
     self.print()
 
@@ -225,10 +235,10 @@ class Progress:
     print(line + padding, end="\r")
 
 
-def concat(mkvmerge, working_dir, n_segments, output):
+def concat(args, n_segments):
   print("\nconcatenating")
   segments = ["segment_{}.ivf".format(n + 1) for n in range(n_segments)]
-  segments = [os.path.join(working_dir, segment) for segment in segments]
+  segments = [os.path.join(args.working_dir, segment) for segment in segments]
 
   if any(not os.path.exists(segment) for segment in segments):
     raise Exception("Segment {} is missing".format(segment))
@@ -241,8 +251,29 @@ def concat(mkvmerge, working_dir, n_segments, output):
     file_limit = -1
     cmd_limit = 32767
 
-  out = _concat(mkvmerge, working_dir, segments, output, file_limit, cmd_limit)
-  os.replace(out, output)
+  out = _concat(args.mkvmerge, args.working_dir, segments, args.output,
+                file_limit, cmd_limit)
+
+  if not args.copy_timestamps and not args.mux:
+    os.replace(out, args.output)
+    return segments
+
+  extract = []
+  if args.copy_timestamps:
+    extract = [
+      "--timestamps", "0:" + os.path.join(args.working_dir, "timestamps.txt")
+    ]
+    subprocess.run([args.mkvextract, args.input, "timestamps_v2", extract[1]])
+
+  merge = [args.mkvmerge]
+
+  if args.mux:
+    merge += ["-D", args.input]
+
+  merge += extract + [out, "-o", args.output]
+
+  subprocess.run(merge)
+
   return segments
 
 
@@ -387,13 +418,9 @@ def main():
 
   from pkg_resources import resource_filename
 
-  aomenc = require_exec("aomenc")
-  vspipe = require_exec("vspipe")
-  mkvmerge = require_exec("mkvmerge")
-  onepass_keyframes = require_exec(
-    "onepass_keyframes", resource_filename("aomenc_by_gop", onepass_keyframes))
-
   parser = argparse.ArgumentParser(add_help=False)
+  parser.add_argument("--help", action="help")
+
   parser.add_argument("-i", "--input", required=True)
   parser.add_argument("output")
   parser.add_argument("--workers", default=4)
@@ -408,21 +435,42 @@ def main():
                       help="Skip warning / overwrite output",
                       action="store_true")
   parser.add_argument("--priority", default=0, help="Process priority")
-  parser.add_argument("--help", action="help")
+  parser.add_argument("--copy_timestamps",
+                      default=False,
+                      action="store_true",
+                      help="Copy timestamps from input file.\n" \
+                      "Support for variable frame rate")
+  parser.add_argument("--mux",
+                      default=False,
+                      action="store_true",
+                      help="Mux with contents of input file")
+
+  parser.add_argument("--aomenc", default="aomenc", help="Path to aomenc")
+  parser.add_argument("--vspipe", default="vspipe", help="Path to vspipe")
+  parser.add_argument("--mkvmerge",
+                      default="mkvmerge",
+                      help="Path to mkvmerge")
+  parser.add_argument("--mkvextract",
+                      default="mkvextract",
+                      help="Path to mkvmerge. Required for VFR")
 
   args, aom_args = parser.parse_known_args()
+
+  aomenc = require_exec(args.aomenc)
+  vspipe = require_exec(args.vspipe)
+  mkvmerge = require_exec(args.mkvmerge)
+  onepass_keyframes = require_exec(
+    "onepass_keyframes", resource_filename("aomenc_by_gop", onepass_keyframes))
+
+  parse_args(args)
 
   print("aomenc:", aomenc)
   print("vspipe:", vspipe)
   print("mkvmerge:", mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
 
-  parse_args(args)
   args.priority = priorities[str(args.priority)] if CREATE_NO_WINDOW else 0
-  args.vspipe = vspipe
-  args.aomenc = aomenc
 
-  completed_frames = Counter()
   progress_bar = Progress(args.num_frames)
 
   if args.vpy:
@@ -538,7 +586,7 @@ resized.set_output()"""
       for worker in workers:
         worker.working.wait()
 
-      segments = concat(mkvmerge, args.working_dir, counter.n, args.output)
+      segments = concat(args, counter.n)
 
       # cleanup
 
@@ -547,6 +595,10 @@ resized.set_output()"""
         os.path.join(args.working_dir, "{}.tmp0.mkv".format(args.output)),
         os.path.join(args.working_dir, "{}.tmp1.mkv".format(args.output))
       ]
+
+      timestamps = os.path.join(args.working_dir, "timestamps.txt")
+      if os.path.isfile(timestamps):
+        os.remove(timestamps)
 
       for file in tmp_files:
         if os.path.exists(file):
@@ -583,3 +635,7 @@ resized.set_output()"""
       worker.kill()
 
     exit(0)
+
+
+if __name__ == "__main__":
+  main()
