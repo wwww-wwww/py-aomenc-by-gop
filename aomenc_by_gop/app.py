@@ -12,7 +12,6 @@ else:
 priorities = {
   "-2": 0x00000040,
   "-1": 0x00004000,
-  "0": 0x00000020,
   "1": 0x00008000,
   "2": 0x00000080,
 }
@@ -77,8 +76,7 @@ class Queue:
 
 
 class Worker:
-  def __init__(self, args, queue, aom_args, passes, script, update1, update2,
-               priority):
+  def __init__(self, args, queue, aom_args, passes, script, update1, update2):
     self.queue = queue
     self.args = args
     self.aom_args = aom_args
@@ -91,7 +89,6 @@ class Worker:
     self.working = Event()
     self.working.set()
     self.stopped = False
-    self.priority = priority
     Thread(target=self.loop, daemon=True).start()
 
   def encode(self, segment):
@@ -130,7 +127,7 @@ class Worker:
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT,
                                    universal_newlines=True,
-                                   creationflags=self.priority)
+                                   creationflags=self.args.priority)
 
       self.update2()
 
@@ -205,10 +202,8 @@ class Progress:
       self.description = description
 
     if n:
-      while not self.lock.acquire(timeout=1):
-        pass
-      self.n += n
-      self.lock.release()
+      with self.lock:
+        self.n += n
 
     self.print()
 
@@ -435,7 +430,7 @@ def main():
                       help="Skip warning / overwrite output",
                       action="store_true")
   parser.add_argument("--priority", default=0, help="Process priority")
-  parser.add_argument("--copy_timestamps",
+  parser.add_argument("--copy-timestamps",
                       default=False,
                       action="store_true",
                       help="Copy timestamps from input file.\n" \
@@ -469,7 +464,8 @@ def main():
   print("mkvmerge:", mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
 
-  args.priority = priorities[str(args.priority)] if CREATE_NO_WINDOW else 0
+  if args.priority and CREATE_NO_WINDOW:
+    args.priority = priorities[str(args.priority)]
 
   progress_bar = Progress(args.num_frames)
 
@@ -521,7 +517,7 @@ resized.set_output()"""
   for i in range(args.workers):
     workers.append(
       Worker(args, queue, aom_args, args.passes, script_name,
-             progress_bar.update, update, args.priority))
+             progress_bar.update, update))
 
   get_gop = [vspipe, script_name_gop, "-", "-y"]
 
