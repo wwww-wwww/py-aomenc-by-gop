@@ -547,6 +547,7 @@ resized.set_output()"""
                           stdin=vspipe_pipe.stdout,
                           stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE,
+                          universal_newlines=True,
                           creationflags=CREATE_NO_WINDOW)
 
   counter = Counter()
@@ -556,32 +557,31 @@ resized.set_output()"""
 
   try:
     while True:
-      line = pipe.stderr.readline().strip().decode("utf-8")
+      line = pipe.stderr.readline()
 
       if len(line) == 0 and pipe.poll() is not None:
         break
 
-      if len(line) > 0:
-        output_log.append(line)
-        match = re.match(re_keyframe, line)
-        if match:
-          frame = int(match.group(1))
-          frame_type = int(match.group(2))
-          length = frame - start
-          if length - args.kf_max_dist > args.kf_max_dist:
-            queue.submit(start, start + args.kf_max_dist - 1, counter.inc())
-            start += args.kf_max_dist
-          elif frame_type == 1:
-            if length > args.kf_max_dist:
-              queue.submit(start, start + int(length / 2) - 1, counter.inc())
-              start += int(length / 2)
-              queue.submit(start, frame - 1, counter.inc())
-              start = frame
-            elif length > args.min_dist:
-              queue.submit(start, frame - 1, counter.inc())
-              start = frame
-          else:
-            update()
+      output_log.append(line.strip())
+      match = re.match(re_keyframe, line.strip())
+      if match:
+        frame = int(match.group(1))
+        frame_type = int(match.group(2))
+        length = frame - start
+        if length - args.kf_max_dist > args.kf_max_dist:
+          queue.submit(start, start + args.kf_max_dist - 1, counter.inc())
+          start += args.kf_max_dist
+        elif frame_type == 1:
+          if length > args.kf_max_dist:
+            queue.submit(start, start + int(length / 2) - 1, counter.inc())
+            start += int(length / 2)
+            queue.submit(start, frame - 1, counter.inc())
+            start = frame
+          elif length > args.min_dist:
+            queue.submit(start, frame - 1, counter.inc())
+            start = frame
+        else:
+          update()
 
     if pipe.returncode == 0:
       if args.num_frames > start:
