@@ -98,22 +98,21 @@ class Worker:
       str(segment[1])
     ]
 
-    segment_output = os.path.join(self.args.working_dir,
-                                  f"segment_{segment[2]}.ivf")
+    segment_tmp = tempfile.mktemp(dir=self.args._working_dir, suffix=".ivf")
 
     aomenc_cmd = [
       self.args.aomenc,
       "-",
       "--ivf",
       "-o",
-      segment_output,
+      segment_tmp,
       f"--passes={self.passes}",
     ] + self.aom_args
 
     for p in range(self.passes):
       pass_cmd = aomenc_cmd + [f"--pass={p + 1}"]
       if self.passes == 2:
-        segment_fpf = os.path.join(self.args.working_dir,
+        segment_fpf = os.path.join(self.args._working_dir,
                                    f"segment_{segment[2]}.log")
         pass_cmd.append(f"--fpf={segment_fpf}")
 
@@ -166,6 +165,9 @@ class Worker:
         self.pipe = None
         self.update2()
 
+    segment_output = os.path.join(self.args._working_dir,
+                                  f"segment_{segment[2]}.ivf")
+    shutil.move(segment_tmp, segment_output)
     return True
 
   def loop(self):
@@ -232,7 +234,7 @@ class Progress:
 def concat(args, n_segments):
   print("\nconcatenating")
   segments = [f"segment_{n + 1}.ivf" for n in range(n_segments)]
-  segments = [os.path.join(args.working_dir, segment) for segment in segments]
+  segments = [os.path.join(args._working_dir, segment) for segment in segments]
 
   for segment in segments:
     if not os.path.exists(segment):
@@ -246,7 +248,7 @@ def concat(args, n_segments):
     file_limit = -1
     cmd_limit = 32767
 
-  out = _concat(args.mkvmerge, args.working_dir, segments, args.output,
+  out = _concat(args.mkvmerge, args._working_dir, segments, args.output,
                 file_limit, cmd_limit)
 
   if not args.copy_timestamps and not args.mux:
@@ -255,7 +257,7 @@ def concat(args, n_segments):
 
   extract = []
   if args.copy_timestamps:
-    path_timestamps = os.path.join(args.working_dir, "timestamps.txt")
+    path_timestamps = os.path.join(args._working_dir, "timestamps.txt")
     extract = ["--timestamps", f"0:{path_timestamps}"]
     subprocess.run([args.mkvextract, args.input, "timestamps_v2", extract[1]])
     if args.start != 0:
@@ -368,7 +370,7 @@ def parse_args(args):
   print("Max workers:", args.workers)
   print("Passes:", args.passes)
 
-  core = vapoursynth.get_core()
+  core = vapoursynth.core
 
   args.vpy = os.path.splitext(args.input)[1] == ".vpy"
   if args.vpy:
@@ -400,21 +402,26 @@ def parse_args(args):
   args.start = int(args.start or 0)
   args.end = int(args.end or num_frames - 1)
 
-  if args.end:
-    if args.end >= num_frames or (args.start and args.end < args.start):
-      raise Exception("End frame out of bounds")
+  if args.end >= num_frames or (args.start and args.end < args.start):
+    raise Exception("End frame out of bounds")
 
   args.num_frames = args.end - args.start + 1
 
-  args.working_dir = tempfile.mkdtemp(dir=os.getcwd())
-  print("Working directory:", args.working_dir)
+  args._working_dir = args.working_dir or tempfile.mkdtemp(dir=os.getcwd())
+  print("Working directory:", args._working_dir)
+
+  if args.keyframes:
+    args._keyframes = args.keyframes
+    print("Using keyframes file:", args.keyframes)
+  elif args.working_dir:
+    args._keyframes = os.path.join(args.working_dir, "keyframes.txt")
+  else:
+    args._keyframes = None
 
   print(str(video))
 
 
 def main():
-  import sys
-
   if sys.platform == "win32" or sys.platform == "cygwin":
     onepass_keyframes = "bin/win64/onepass_keyframes.exe"
   else:
@@ -448,6 +455,14 @@ def main():
                       default=False,
                       action="store_true",
                       help="Mux with contents of input file")
+
+  parser.add_argument("--keyframes",
+                      default=None,
+                      help="Path to keyframes file")
+  parser.add_argument("--working_dir",
+                      default=None,
+                      help="Path to working dir.\n" \
+                      "Allows resuming and does not remove files after completion")
 
   parser.add_argument("--aomenc", default="aomenc", help="Path to aomenc")
   parser.add_argument("--vspipe", default="vspipe", help="Path to vspipe")
@@ -493,7 +508,7 @@ vs.core.resize.Point(v, format=vs.YUV420P8).set_output()"""
     script = "from vapoursynth import core\n" \
             "core.{}(r\"{}\").set_output()".format(args.use, args.input)
 
-    script_name = os.path.join(args.working_dir, "video.vpy")
+    script_name = os.path.join(args._working_dir, "video.vpy")
 
     with open(script_name, "w+") as script_f:
       script_f.write(script)
@@ -506,7 +521,7 @@ resized = vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8)
 resized.set_output()"""
     script_gop = script_gop.format(args.use, args.input)
 
-  script_name_gop = os.path.join(args.working_dir, "gop.vpy")
+  script_name_gop = os.path.join(args._working_dir, "gop.vpy")
 
   with open(script_name_gop, "w+") as script_f:
     script_f.write(script_gop)
@@ -531,118 +546,152 @@ resized.set_output()"""
       Worker(args, queue, aom_args, args.passes, script_name,
              progress_bar.update, update))
 
-  get_gop = [args.vspipe, script_name_gop, "-", "-y"]
-
-  if args.start:
-    get_gop.extend(["-s", str(args.start)])
-
-  if args.end:
-    get_gop.extend(["-e", str(args.end)])
-
-  vspipe_pipe = subprocess.Popen(get_gop,
-                                 stdout=subprocess.PIPE,
-                                 creationflags=CREATE_NO_WINDOW)
-
-  pipe = subprocess.Popen(onepass_keyframes,
-                          stdin=vspipe_pipe.stdout,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE,
-                          universal_newlines=True,
-                          creationflags=CREATE_NO_WINDOW)
-
   counter = Counter()
 
   start = 0
+  offset = 0
   output_log = []
 
-  try:
-    while True:
-      line = pipe.stderr.readline()
+  def parse_keyframe(line, frame, start):
+    match = re.match(re_keyframe, line.strip())
+    if match:
+      frame = int(match.group(1)) + offset
+      frame_type = int(match.group(2))
+      length = frame - start
+      if length - args.kf_max_dist > args.kf_max_dist:
+        queue.submit(start, start + args.kf_max_dist - 1, counter.inc())
+        start += args.kf_max_dist
+      elif frame_type == 1:
+        if length > args.kf_max_dist:
+          queue.submit(start, start + int(length / 2) - 1, counter.inc())
+          start += int(length / 2)
+          queue.submit(start, frame - 1, counter.inc())
+          start = frame
+        elif length > args.min_dist:
+          queue.submit(start, frame - 1, counter.inc())
+          start = frame
+      return True, frame, start, frame_type
+    return False, frame, start, 0
 
-      if len(line) == 0 and pipe.poll() is not None:
-        break
+  if args._keyframes:
+    if os.path.isfile(args._keyframes):
+      with open(args._keyframes, "r") as f:
+        for line in f.readlines():
+          _kf, frame, start, _ft = parse_keyframe(line, frame, start)
 
-      output_log.append(line.strip())
-      match = re.match(re_keyframe, line.strip())
-      if match:
-        frame = int(match.group(1))
-        frame_type = int(match.group(2))
-        length = frame - start
-        if length - args.kf_max_dist > args.kf_max_dist:
-          queue.submit(start, start + args.kf_max_dist - 1, counter.inc())
-          start += args.kf_max_dist
-        elif frame_type == 1:
-          if length > args.kf_max_dist:
-            queue.submit(start, start + int(length / 2) - 1, counter.inc())
-            start += int(length / 2)
-            queue.submit(start, frame - 1, counter.inc())
-            start = frame
-          elif length > args.min_dist:
-            queue.submit(start, frame - 1, counter.inc())
-            start = frame
-        else:
-          update()
-
-    if pipe.returncode == 0:
-      if args.num_frames > start:
-        queue.submit(start, args.num_frames - 1, counter.inc())
-
-      frame = args.num_frames
       update()
 
-      queue.wait_empty()
+    keyframes_file = open(args._keyframes, "a+")
+
+  offset = frame
+  args.start += frame
+
+  if args.start < args.end:
+    get_gop = [
+      args.vspipe,
+      script_name_gop,
+      "-",
+      "-y",
+      "-s",
+      str(args.start),
+      "-e",
+      str(args.end),
+    ]
+
+    gop_lines = []
+    try:
+      vspipe_pipe = subprocess.Popen(get_gop,
+                                     stdout=subprocess.PIPE,
+                                     creationflags=CREATE_NO_WINDOW)
+
+      pipe = subprocess.Popen(onepass_keyframes,
+                              stdin=vspipe_pipe.stdout,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              universal_newlines=True,
+                              creationflags=CREATE_NO_WINDOW)
+      while True:
+        line = pipe.stderr.readline()
+
+        if len(line) == 0 and pipe.poll() is not None:
+          break
+
+        line = line.strip()
+        output_log.append(line)
+
+        match, frame, start, frame_type = parse_keyframe(line, frame, start)
+        if match:
+          if args.keyframes:
+            gop_lines.append(f"frame {frame} {frame_type}\n")
+            if frame_type:
+              keyframes_file.writelines(gop_lines)
+              gop_lines.clear()
+          update()
+
+      if pipe.returncode != 0:
+        print()
+        print("".join(output_log))
+        exit(1)
+
+    except KeyboardInterrupt:
+      print("\ncancelled")
+    except:
+      print(traceback.format_exc())
+      exit(1)
+    finally:
+      queue.queue.clear()
+      vspipe_pipe.kill()
+      pipe.kill()
       for worker in workers:
-        worker.working.wait()
+        worker.kill()
+      if pipe.returncode != 0:
+        exit(1)
 
-      segments = concat(args, counter.n)
+    if args.num_frames > start:
+      queue.submit(start, args.num_frames - 1, counter.inc())
 
-      # cleanup
+    frame = args.num_frames
+    update()
 
-      # remove temporary files used by recursive concat
-      tmp_files = [
-        os.path.join(args.working_dir, f"{args.output}.tmp0.mkv"),
-        os.path.join(args.working_dir, f"{args.output}.tmp1.mkv")
-      ]
-
-      timestamps = os.path.join(args.working_dir, "timestamps.txt")
-      if os.path.isfile(timestamps):
-        os.remove(timestamps)
-
-      for file in tmp_files:
-        if os.path.exists(file):
-          os.remove(file)
-
-      for segment in segments:
-        os.remove(segment)
-        if args.passes == 2:
-          fpf = os.path.splitext(segment)[0] + ".log"
-          os.remove(fpf)
-
-      if not args.vpy:
-        os.remove(script_name)
-        os.remove(script_name_gop)
-
-      os.rmdir(args.working_dir)
-
-      print("completed")
-
-    else:
-      print()
-      print("".join(output_log))
-
-  except KeyboardInterrupt:
-    print("\ncancelled")
-  except:
-    print(traceback.format_exc())
-    exit(1)
-  finally:
-    queue.queue.clear()
-    vspipe_pipe.kill()
-    pipe.kill()
+  if len(workers) > 0:
+    queue.wait_empty()
     for worker in workers:
-      worker.kill()
+      worker.working.wait()
 
-    exit(0)
+  segments = concat(args, counter.n)
+
+  # cleanup
+  if not args.working_dir:
+    # remove temporary files used by recursive concat
+    tmp_files = [
+      os.path.join(args._working_dir, f"{args.output}.tmp0.mkv"),
+      os.path.join(args._working_dir, f"{args.output}.tmp1.mkv")
+    ]
+
+    timestamps = os.path.join(args._working_dir, "timestamps.txt")
+    if os.path.isfile(timestamps):
+      os.remove(timestamps)
+
+    for file in tmp_files:
+      if os.path.exists(file):
+        os.remove(file)
+
+    for segment in segments:
+      os.remove(segment)
+      if args.passes == 2:
+        fpf = os.path.splitext(segment)[0] + ".log"
+        os.remove(fpf)
+
+    if not args.vpy:
+      os.remove(script_name)
+      os.remove(script_name_gop)
+
+    if not args.keyframes:
+      os.remove(args._keyframes)
+
+    os.rmdir(args._working_dir)
+
+  print("completed")
 
 
 if __name__ == "__main__":
