@@ -150,15 +150,16 @@ class Worker:
                 self.update(new_frame - frame)
                 frame = new_frame
 
+      except:
+        print(traceback.format_exc())
+      finally:
         if self.pipe.returncode != 0:
           if self.stopped: return False
           self.update(-frame)
           print(vspipe_cmd, "|", pass_cmd)
           print("\n" + "\n".join(s_output))
           return False
-      except:
-        print(traceback.format_exc())
-      finally:
+
         self.vspipe.kill()
         self.pipe.kill()
         self.vspipe = None
@@ -232,7 +233,7 @@ class Progress:
 
 
 def concat(args, n_segments):
-  print("\nconcatenating")
+  print("\nConcatenating")
   segments = [f"segment_{n + 1}.ivf" for n in range(n_segments)]
   segments = [os.path.join(args._working_dir, segment) for segment in segments]
 
@@ -410,6 +411,9 @@ def parse_args(args):
   args._working_dir = args.working_dir or tempfile.mkdtemp(dir=os.getcwd())
   print("Working directory:", args._working_dir)
 
+  if args.working_dir and not os.path.isdir(args.working_dir):
+    os.mkdir(args.working_dir)
+
   if args.keyframes:
     args._keyframes = args.keyframes
     print("Using keyframes file:", args.keyframes)
@@ -552,6 +556,12 @@ resized.set_output()"""
   offset = 0
   output_log = []
 
+  def add_job(start_frame, end_frame):
+    n = counter.inc()
+    segment_output = os.path.join(args._working_dir, f"segment_{n}.ivf")
+    if not os.path.isfile(segment_output):
+      queue.submit(start_frame, end_frame - 1, n)
+
   def parse_keyframe(line, frame, start):
     match = re.match(re_keyframe, line.strip())
     if match:
@@ -559,16 +569,16 @@ resized.set_output()"""
       frame_type = int(match.group(2))
       length = frame - start
       if length - args.kf_max_dist > args.kf_max_dist:
-        queue.submit(start, start + args.kf_max_dist - 1, counter.inc())
+        add_job(start, start + args.kf_max_dist)
         start += args.kf_max_dist
       elif frame_type == 1:
         if length > args.kf_max_dist:
-          queue.submit(start, start + int(length / 2) - 1, counter.inc())
+          add_job(start, start + int(length / 2))
           start += int(length / 2)
-          queue.submit(start, frame - 1, counter.inc())
+          add_job(start, frame)
           start = frame
         elif length > args.min_dist:
-          queue.submit(start, frame - 1, counter.inc())
+          add_job(start, frame)
           start = frame
       return True, frame, start, frame_type
     return False, frame, start, 0
@@ -628,13 +638,16 @@ resized.set_output()"""
               gop_lines.clear()
           update()
 
-      if pipe.returncode != 0:
-        print()
-        print("".join(output_log))
-        exit(1)
+      if pipe.returncode == 0:
+        if frame < args.num_frames:
+          gop_lines.extend([
+            f"frame {frame + i + 1} 0\n"
+            for i in range(args.num_frames - frame - 1)
+          ])
+        keyframes_file.writelines(gop_lines)
 
     except KeyboardInterrupt:
-      print("\ncancelled")
+      print("\nCancelled")
     except:
       print(traceback.format_exc())
       exit(1)
@@ -645,13 +658,15 @@ resized.set_output()"""
       for worker in workers:
         worker.kill()
       if pipe.returncode != 0:
+        print()
+        print("".join(output_log))
         exit(1)
 
-    if args.num_frames > start:
-      queue.submit(start, args.num_frames - 1, counter.inc())
+  if args.num_frames > start:
+    queue.submit(start, args.num_frames - 1, counter.inc())
 
-    frame = args.num_frames
-    update()
+  frame = args.num_frames
+  update()
 
   if len(workers) > 0:
     queue.wait_empty()
@@ -691,7 +706,7 @@ resized.set_output()"""
 
     os.rmdir(args._working_dir)
 
-  print("completed")
+  print("Completed")
 
 
 if __name__ == "__main__":
