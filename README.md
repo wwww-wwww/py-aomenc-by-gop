@@ -13,18 +13,18 @@ Simple 2 pass encode:
 ```aomenc-by-gop -i file.mkv out.mkv```
 
 Other examples:  
-```aomenc-by-gop -i input.mkv out.webm --workers 6 --kf-max-dist=120 --threads=8 --cpu-used=6```  
-```aomenc-by-gop -i input.mkv out.mkv -s 100 -e 200 --threads=8 --cpu-used=6```  
+```aomenc-by-gop -i input.mkv out.mkv --copy-timestamps --workers 6 --kf-max-dist=120 --threads=8 --cpu-used=6```  
+```aomenc-by-gop -i input.mkv out.webm -s 100 -e 200 --threads=8 --cpu-used=6```  
 ```aomenc-by-gop -i script.vpy out.mkv -s 100 -e 200 --threads=8 --cpu-used=6```
 
 Enable resuming:  
-```aomenc-by-gop -i input.mkv out.mkv --working_dir project```
+```aomenc-by-gop -i input.mkv out.mkv --working-dir project```
 
 Save/use onepass keyframes file  
 ```aomenc-by-gop -i input.mkv out.mkv --keyframes input.txt```
 
 Enable resuming using a different onepass keyframes file  
-```aomenc-by-gop -i input.mkv out.mkv --working_dir project --keyframes input.txt```
+```aomenc-by-gop -i input.mkv out.mkv --working-dir project --keyframes input.txt```
 
 Use vpxenc:  
 ```aomenc-by-gop -i input out.mkv --aomenc vpxenc```

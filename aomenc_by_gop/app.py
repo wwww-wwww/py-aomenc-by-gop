@@ -258,16 +258,19 @@ def concat(args, n_segments):
 
   extract = []
   if args.copy_timestamps:
+    print("Extracting timestamps")
     path_timestamps = os.path.join(args._working_dir, "timestamps.txt")
     extract = ["--timestamps", f"0:{path_timestamps}"]
-    subprocess.run([args.mkvextract, args.input, "timestamps_v2", extract[1]])
-    if args.start != 0:
+    r = subprocess.run(
+      [args.mkvextract, args.input, "timestamps_v2", extract[1]])
+    assert r.returncode == 0
+    if args._start:
       with open(path_timestamps, "r") as f:
         lines = f.readlines()
         lines = [line.strip() for line in lines]
         ts = lines[1:]
         ts = [float(line) for line in ts]
-        ts = ts[args.start:]
+        ts = ts[args._start:]
 
       with open(path_timestamps, "w+") as f:
         f.write(lines[0] + "\n")
@@ -280,7 +283,8 @@ def concat(args, n_segments):
 
   merge += extract + [out, "-o", args.output]
 
-  subprocess.run(merge)
+  print("Merging")
+  assert subprocess.run(merge).returncode == 0
 
   return segments
 
@@ -400,6 +404,7 @@ def parse_args(args):
 
   num_frames = video.num_frames
 
+  args._start = args.start
   args.start = int(args.start or 0)
   args.end = int(args.end or num_frames - 1)
 
@@ -463,7 +468,7 @@ def main():
   parser.add_argument("--keyframes",
                       default=None,
                       help="Path to keyframes file")
-  parser.add_argument("--working_dir",
+  parser.add_argument("--working-dir",
                       default=None,
                       help="Path to working dir.\n" \
                       "Allows resuming and does not remove files after completion")
@@ -559,7 +564,9 @@ resized.set_output()"""
   def add_job(start_frame, end_frame):
     n = counter.inc()
     segment_output = os.path.join(args._working_dir, f"segment_{n}.ivf")
-    if not os.path.isfile(segment_output):
+    if os.path.isfile(segment_output):
+      progress_bar.update(end_frame - start_frame)
+    else:
       queue.submit(start_frame, end_frame - 1, n)
 
   def parse_keyframe(line, frame, start):
@@ -663,7 +670,7 @@ resized.set_output()"""
         exit(1)
 
   if args.num_frames > start:
-    queue.submit(start, args.num_frames - 1, counter.inc())
+    add_job(start, args.num_frames)
 
   frame = args.num_frames
   update()
@@ -675,8 +682,8 @@ resized.set_output()"""
 
   segments = concat(args, counter.n)
 
-  # cleanup
   if not args.working_dir:
+    print("Cleaning up")
     # remove temporary files used by recursive concat
     tmp_files = [
       os.path.join(args._working_dir, f"{args.output}.tmp0.mkv"),
