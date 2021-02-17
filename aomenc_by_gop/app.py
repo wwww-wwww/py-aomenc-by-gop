@@ -587,6 +587,7 @@ resized.set_output()"""
         elif length > args.min_dist:
           add_job(start, frame)
           start = frame
+
       return True, frame, start, frame_type
     return False, frame, start, 0
 
@@ -597,8 +598,6 @@ resized.set_output()"""
           _kf, frame, start, _ft = parse_keyframe(line, frame, start)
 
       update()
-
-    keyframes_file = open(args._keyframes, "a+")
 
   offset = frame
   args.start += frame
@@ -617,41 +616,43 @@ resized.set_output()"""
 
     gop_lines = []
     try:
-      vspipe_pipe = subprocess.Popen(get_gop,
-                                     stdout=subprocess.PIPE,
-                                     creationflags=CREATE_NO_WINDOW)
+      with open(args._keyframes, "a+") as keyframes_file:
+        vspipe_pipe = subprocess.Popen(get_gop,
+                                       stdout=subprocess.PIPE,
+                                       creationflags=CREATE_NO_WINDOW)
 
-      pipe = subprocess.Popen(onepass_keyframes,
-                              stdin=vspipe_pipe.stdout,
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE,
-                              universal_newlines=True,
-                              creationflags=CREATE_NO_WINDOW)
-      while True:
-        line = pipe.stderr.readline()
+        pipe = subprocess.Popen(onepass_keyframes,
+                                stdin=vspipe_pipe.stdout,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                universal_newlines=True,
+                                creationflags=CREATE_NO_WINDOW)
+        while True:
+          line = pipe.stderr.readline()
 
-        if len(line) == 0 and pipe.poll() is not None:
-          break
+          if len(line) == 0 and pipe.poll() is not None:
+            break
 
-        line = line.strip()
-        output_log.append(line)
+          line = line.strip()
+          output_log.append(line)
 
-        match, frame, start, frame_type = parse_keyframe(line, frame, start)
-        if match:
-          if args.keyframes:
-            gop_lines.append(f"frame {frame} {frame_type}\n")
-            if frame_type:
-              keyframes_file.writelines(gop_lines)
-              gop_lines.clear()
-          update()
+          match, frame, start, frame_type = parse_keyframe(line, frame, start)
+          if match:
+            if args._keyframes:
+              gop_lines.append(f"frame {frame} {frame_type}\n")
+              if frame_type:
+                keyframes_file.writelines(gop_lines)
+                keyframes_file.flush()
+                gop_lines.clear()
+            update()
 
-      if pipe.returncode == 0:
-        if frame < args.num_frames:
-          gop_lines.extend([
-            f"frame {frame + i + 1} 0\n"
-            for i in range(args.num_frames - frame - 1)
-          ])
-        keyframes_file.writelines(gop_lines)
+        if pipe.returncode == 0:
+          if frame < args.num_frames:
+            gop_lines.extend([
+              f"frame {frame + i + 1} 0\n"
+              for i in range(args.num_frames - frame - 1)
+            ])
+          keyframes_file.writelines(gop_lines)
 
     except KeyboardInterrupt:
       print("\nCancelled")
