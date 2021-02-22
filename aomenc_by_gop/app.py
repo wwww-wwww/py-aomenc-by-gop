@@ -3,11 +3,20 @@ from threading import Thread, Lock, Condition, Event
 
 re_keyframe = r"frame *([0-9]+) *([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
+re_mkvmerge_track = r"Track ID ([0-9]+?): video"
 
 if hasattr(subprocess, "CREATE_NO_WINDOW"):
   CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 else:
   CREATE_NO_WINDOW = 0
+
+if platform.system() == "Linux":
+  import resource
+  file_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+  cmd_limit = os.sysconf(os.sysconf_names["SC_ARG_MAX"])
+else:
+  file_limit = -1
+  cmd_limit = 32767
 
 priorities = {
   "-2": 0x00000040,
@@ -116,24 +125,22 @@ class Worker:
                                    f"segment_{segment[2]}.log")
         pass_cmd.append(f"--fpf={segment_fpf}")
 
-      self.vspipe = subprocess.Popen(vspipe_cmd,
-                                     stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL,
-                                     creationflags=CREATE_NO_WINDOW)
-
-      self.pipe = subprocess.Popen(pass_cmd,
-                                   stdin=self.vspipe.stdout,
-                                   stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT,
-                                   universal_newlines=True,
-                                   creationflags=self.args.priority)
-
-      self.update2()
-
       frame = 0
-
       s_output = []
       try:
+        self.vspipe = subprocess.Popen(vspipe_cmd,
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL,
+                                       creationflags=CREATE_NO_WINDOW)
+
+        self.pipe = subprocess.Popen(pass_cmd,
+                                     stdin=self.vspipe.stdout,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT,
+                                     universal_newlines=True,
+                                     creationflags=self.args.priority)
+
+        self.update2()
         while True:
           line = self.pipe.stdout.readline()
 
@@ -156,7 +163,7 @@ class Worker:
         if self.pipe.returncode != 0:
           if self.stopped: return False
           self.update(-frame)
-          print(vspipe_cmd, "|", pass_cmd)
+          print(" ".join(vspipe_cmd), "|", " ".join(pass_cmd))
           print("\n" + "\n".join(s_output))
           return False
 
@@ -171,14 +178,19 @@ class Worker:
     shutil.move(segment_tmp, segment_output)
     return True
 
+  def _encode(self, segment):
+    for _i in range(3):
+      if self.encode(segment): return True
+
+    return False
+
   def loop(self):
     while True:
       if self.stopped: return
       segment = self.queue.acquire(self)
       if segment:
-        for i in range(3):
-          if self.encode(segment): break
-
+        if not self._encode(segment):
+          pass  # exit
       self.working.set()
 
   def kill(self):
@@ -241,29 +253,41 @@ def concat(args, n_segments):
     if not os.path.exists(segment):
       raise Exception(f"Segment {segment} is missing")
 
-  if platform.system() == "Linux":
-    import resource
-    file_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-    cmd_limit = os.sysconf(os.sysconf_names["SC_ARG_MAX"])
-  else:
-    file_limit = -1
-    cmd_limit = 32767
-
-  out = _concat(args.mkvmerge, args._working_dir, segments, args.output,
-                file_limit, cmd_limit)
+  out = _concat(args.mkvmerge, args._working_dir, segments, args.output)
 
   if not args.copy_timestamps and not args.mux:
     os.replace(out, args.output)
     return segments
 
-  extract = []
+  merge = [args.mkvmerge, "-o", args.output]
+
   if args.copy_timestamps:
-    print("Extracting timestamps")
-    path_timestamps = os.path.join(args._working_dir, "timestamps.txt")
-    extract = ["--timestamps", f"0:{path_timestamps}"]
-    r = subprocess.run(
-      [args.mkvextract, args.input, "timestamps_v2", extract[1]])
+    print("Getting track id")
+    trackid = 0
+    r = subprocess.run([args.mkvmerge, "--identify", args.input],
+                       capture_output=True,
+                       universal_newlines=True)
     assert r.returncode == 0
+    lines = r.stdout.splitlines()
+    tracks = [re.match(re_mkvmerge_track, line) for line in lines]
+    tracks = [track for track in tracks if track]
+    assert len(tracks) > 0
+    trackid = tracks[0].group(1)
+
+    print("Extracting timestamps for track", trackid)
+    path_timestamps = os.path.join(args._working_dir, "timestamps.txt")
+
+    merge += ["--timestamps", f"0:{path_timestamps}"]
+
+    extract = [
+      args.mkvextract,
+      args.input,
+      "timestamps_v2",
+      f"{trackid}:{path_timestamps}",
+    ]
+
+    assert subprocess.run(extract).returncode == 0
+
     if args._start:
       with open(path_timestamps, "r") as f:
         lines = f.readlines()
@@ -276,12 +300,10 @@ def concat(args, n_segments):
         f.write(lines[0] + "\n")
         f.writelines([str(line) + "\n" for line in ts])
 
-  merge = [args.mkvmerge]
+  merge += [out]
 
   if args.mux:
     merge += ["-D", args.input]
-
-  merge += extract + [out, "-o", args.output]
 
   print("Merging")
   assert subprocess.run(merge).returncode == 0
@@ -289,14 +311,8 @@ def concat(args, n_segments):
   return segments
 
 
-def _concat(mkvmerge,
-            working_dir,
-            files,
-            output,
-            file_limit,
-            cmd_limit,
-            flip=False):
-  tmp_out = os.path.join(working_dir, f"{output}.tmp{int(flip)}.mkv")
+def _concat(mkvmerge, cwd, files, output, flip=False):
+  tmp_out = os.path.join(cwd, f"{output}.tmp{int(flip)}.mkv")
   cmd = [mkvmerge, "-o", tmp_out, files[0]]
 
   remaining = []
@@ -309,19 +325,10 @@ def _concat(mkvmerge,
       remaining = files[i + 1:]
       break
 
-  concat = subprocess.Popen(cmd,
-                            stdout=subprocess.PIPE,
-                            universal_newlines=True)
-  message, _ = concat.communicate()
-  concat.wait()
-
-  if concat.returncode != 0:
-    print(message)
-    raise Exception
+  assert subprocess.run(cmd).returncode == 0
 
   if len(remaining) > 0:
-    return _concat(mkvmerge, working_dir, [tmp_out] + remaining, output,
-                   file_limit, cmd_limit, not flip)
+    return _concat(mkvmerge, cwd, [tmp_out] + remaining, output, not flip)
   else:
     return tmp_out
 
