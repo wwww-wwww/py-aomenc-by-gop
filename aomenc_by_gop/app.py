@@ -423,16 +423,14 @@ def parse_args(args):
   args._working_dir = args.working_dir or tempfile.mkdtemp(dir=os.getcwd())
   print("Working directory:", args._working_dir)
 
-  if args.working_dir and not os.path.isdir(args.working_dir):
-    os.mkdir(args.working_dir)
+  if not os.path.isdir(args._working_dir):
+    os.mkdir(args._working_dir)
 
   if args.keyframes:
     args._keyframes = args.keyframes
     print("Using keyframes file:", args.keyframes)
-  elif args.working_dir:
-    args._keyframes = os.path.join(args.working_dir, "keyframes.txt")
   else:
-    args._keyframes = None
+    args._keyframes = os.path.join(args._working_dir, "keyframes.txt")
 
   print(str(video))
 
