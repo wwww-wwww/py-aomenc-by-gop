@@ -16,7 +16,7 @@ if platform.system() == "Linux":
   cmd_limit = os.sysconf(os.sysconf_names["SC_ARG_MAX"])
 else:
   file_limit = -1
-  cmd_limit = 32767
+  cmd_limit = 30000
 
 priorities = {
   "-2": 0x00000040,
@@ -24,19 +24,6 @@ priorities = {
   "1": 0x00008000,
   "2": 0x00000080,
 }
-
-
-class Counter:
-  def __init__(self):
-    self.lock = Lock()
-    self.n = 0
-
-  def add(self, n):
-    self.n += n
-
-  def inc(self):
-    self.n += 1
-    return self.n
 
 
 class Queue:
@@ -189,6 +176,7 @@ class Worker:
       if self.stopped: return
       segment = self.queue.acquire(self)
       if segment:
+        self.working.clear()
         if not self._encode(segment):
           pass  # exit
       self.working.set()
@@ -208,6 +196,7 @@ class Progress:
     self.description = ""
     self.lock = Lock()
     self.n = 0
+    self._n = 0
     self.started = time.time()
     self.last_line = ""
 
@@ -218,13 +207,14 @@ class Progress:
     if n:
       with self.lock:
         self.n += n
+        self._n += n
 
     self.print()
 
   def print(self):
     elapsed = round(time.time() - self.started)
     pct = int(self.n / self.total * 100)
-    fps = self.n / (elapsed or 1)
+    fps = self._n / (elapsed or 1)
     if fps < 1:
       fps = f"{round(fps * 60, 2)}fpm"
     else:
@@ -267,6 +257,9 @@ def concat(args, n_segments):
     r = subprocess.run([args.mkvmerge, "--identify", args.input],
                        capture_output=True,
                        universal_newlines=True)
+    if r.returncode != 0:
+      print(r.stdout)
+      exit(1)
     assert r.returncode == 0
     lines = r.stdout.splitlines()
     tracks = [re.match(re_mkvmerge_track, line) for line in lines]
@@ -318,8 +311,9 @@ def _concat(mkvmerge, cwd, files, output, flip=False):
   remaining = []
   for i, file in enumerate(files[1:]):
     new_cmd = cmd + [f"+{file}"]
-    if sum(len(s) for s in new_cmd) < cmd_limit \
-        and (file_limit == -1 or i < max(1, file_limit - 10)):
+    if sum(len(s)
+           for s in new_cmd) < cmd_limit and (file_limit == -1
+                                              or i < max(1, file_limit - 10)):
       cmd = new_cmd
     else:
       remaining = files[i + 1:]
@@ -516,11 +510,15 @@ def main():
     script_gop = """import vapoursynth as vs
 exec(open(r"{}", "r").read())
 v = vs.get_output()
-vs.core.resize.Point(v, format=vs.YUV420P8).set_output()"""
+w = 1280
+h = 720
+resized = vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8)
+resized.set_output()"""
     script_gop = script_gop.format(args.input)
   else:
-    script = "from vapoursynth import core\n" \
-            "core.{}(r\"{}\").set_output()".format(args.use, args.input)
+    script = """import vapoursynth as vs
+vs.core.resize.Point(vs.core.{}(r\"{}\"), format=vs.YUV420P8).set_output()""".format(
+      args.use, args.input)
 
     script_name = os.path.join(args._working_dir, "video.vpy")
 
@@ -540,6 +538,9 @@ resized.set_output()"""
   with open(script_name_gop, "w+") as script_f:
     script_f.write(script_gop)
 
+  if args.workers <= 0:
+    print("Number of workers set to 0, only getting keyframes")
+
   queue = Queue(args.start)
   workers = []
   frame = 0
@@ -555,46 +556,40 @@ resized.set_output()"""
 
   queue.update = update
 
-  for i in range(args.workers):
-    workers.append(
-      Worker(args, queue, aom_args, args.passes, script_name,
-             progress_bar.update, update))
-
-  counter = Counter()
-
+  n = [0]
   start = 0
   offset = 0
   output_log = []
 
   def add_job(start_frame, end_frame):
-    n = counter.inc()
-    segment_output = os.path.join(args._working_dir, f"segment_{n}.ivf")
+    n[0] += 1
+    segment_output = os.path.join(args._working_dir, f"segment_{n[0]}.ivf")
     if os.path.isfile(segment_output):
+      progress_bar._n -= end_frame - start_frame
       progress_bar.update(end_frame - start_frame)
     else:
-      queue.submit(start_frame, end_frame - 1, n)
+      queue.submit(start_frame, end_frame - 1, n[0])
 
   def parse_keyframe(line, frame, start):
     match = re.match(re_keyframe, line.strip())
-    if match:
-      frame = int(match.group(1)) + offset
-      frame_type = int(match.group(2))
-      length = frame - start
-      if length - args.kf_max_dist > args.kf_max_dist:
-        add_job(start, start + args.kf_max_dist)
-        start += args.kf_max_dist
-      elif frame_type == 1:
-        if length > args.kf_max_dist:
-          add_job(start, start + int(length / 2))
-          start += int(length / 2)
-          add_job(start, frame)
-          start = frame
-        elif length > args.min_dist:
-          add_job(start, frame)
-          start = frame
+    if not match: return False, frame, start, 0
 
-      return True, frame, start, frame_type
-    return False, frame, start, 0
+    frame = int(match.group(1)) + offset
+    frame_type = int(match.group(2))
+    length = frame - start
+    if length - args.kf_max_dist > args.kf_max_dist:
+      add_job(start, start + args.kf_max_dist)
+      start += args.kf_max_dist
+    elif frame_type == 1:
+      if length > args.kf_max_dist:
+        add_job(start, start + int(length / 2))
+        add_job(start + int(length / 2), frame)
+        start = frame
+      elif length > args.min_dist:
+        add_job(start, frame)
+        start = frame
+
+    return True, frame, start, frame_type
 
   if args._keyframes:
     if os.path.isfile(args._keyframes):
@@ -603,6 +598,11 @@ resized.set_output()"""
           _kf, frame, start, _ft = parse_keyframe(line, frame, start)
 
       update()
+
+  for i in range(args.workers):
+    workers.append(
+      Worker(args, queue, aom_args, args.passes, script_name,
+             progress_bar.update, update))
 
   offset = frame
   args.start += frame
@@ -618,6 +618,8 @@ resized.set_output()"""
       "-e",
       str(args.end),
     ]
+
+    print(" ".join(get_gop))
 
     gop_lines = []
     try:
@@ -681,12 +683,15 @@ resized.set_output()"""
   frame = args.num_frames
   update()
 
-  if len(workers) > 0:
-    queue.wait_empty()
-    for worker in workers:
-      worker.working.wait()
+  if len(workers) <= 0:
+    print("Completed getting keyframes")
+    return
 
-  segments = concat(args, counter.n)
+  queue.wait_empty()
+  for worker in workers:
+    worker.working.wait()
+
+  segments = concat(args, n[0])
 
   if not args.working_dir:
     print("Cleaning up")
