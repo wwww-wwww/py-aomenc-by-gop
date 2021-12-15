@@ -1,9 +1,6 @@
 import argparse, os, platform, re, shutil, subprocess, sys, tempfile, time, traceback
-import io
 import vapoursynth as vs
-import threading, inspect, ctypes
 from threading import Condition, Event, Lock, Thread
-from typing import BinaryIO, cast
 
 re_keyframe = r"f *([0-9]+):([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
@@ -28,52 +25,6 @@ priorities = {
   "1": 0x00008000,
   "2": 0x00000080,
 }
-
-
-# http://tomerfiliba.com/recipes/Thread2/
-def _async_raise(tid, exctype):
-  """raises the exception, performs cleanup if needed"""
-  if not inspect.isclass(exctype):
-    raise TypeError("Only types can be raised (not instances)")
-  res = ctypes.pythonapi.PyThreadState_SetAsyncExc(tid,
-                                                   ctypes.py_object(exctype))
-  if res == 0:
-    raise ValueError("invalid thread id")
-  elif res != 1:
-    # """if it returns a number greater than one, you're in trouble,
-    # and you should call it again with exc=NULL to revert the effect"""
-    ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, 0)
-    raise SystemError("PyThreadState_SetAsyncExc failed")
-
-
-class Thread2(Thread):
-  def _get_my_tid(self):
-    """determines this (self's) thread id"""
-
-    # do we have it cached?
-    if hasattr(self, "_thread_id"):
-      return self._thread_id
-
-    # no, look for it in the _active dict
-    for tid, tobj in threading._active.items():
-      if tobj is self:
-        self._thread_id = tid
-        return tid
-
-    raise AssertionError("could not determine the thread's id")
-
-  def raise_exc(self, exctype):
-    """raises the given exception type in the context of this thread"""
-
-    if not self.is_alive():
-      return
-
-    _async_raise(self._get_my_tid(), exctype)
-
-  def terminate(self):
-    """raises SystemExit in the context of the given thread, which should 
-        cause the thread to exit silently (unless caught)"""
-    self.raise_exc(SystemExit)
 
 
 class Queue:
@@ -125,18 +76,15 @@ class Queue:
 
 
 class Worker:
-  def __init__(self, args, filename, source_filter, threads, queue, aom_args,
-               ranges, passes, update):
-    self.args = args
-    self.filename = filename
-    self.source_filter = source_filter
-    self.source_filter_threads = threads
+  def __init__(self, args, queue, aom_args, ranges, passes, script, update):
     self.queue = queue
+    self.args = args
     self.aom_args = aom_args
     self.ranges = ranges
     self.passes = passes
+    self.script = script
+    self.vspipe = None
     self.pipe = None
-    self.pipe_output = None
     self.update = update
     self.working = Event()
     self.working.set()
@@ -150,6 +98,12 @@ class Worker:
       aom_args = ranges[-1][1]
     else:
       aom_args = self.aom_args
+
+    vspipe_cmd = [
+      self.args.vspipe, self.script, "-c", "y4m", "-", "-s",
+      str(segment[0]), "-e",
+      str(segment[1])
+    ]
 
     segment_tmp = tempfile.mktemp(dir=self.args._working_dir, suffix=".ivf")
 
@@ -172,24 +126,23 @@ class Worker:
       frame = 0
       s_output = []
       try:
+        self.vspipe = subprocess.Popen(vspipe_cmd,
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL,
+                                       creationflags=CREATE_NO_WINDOW)
+
         self.pipe = subprocess.Popen(pass_cmd,
-                                     stdin=subprocess.PIPE,
+                                     stdin=self.vspipe.stdout,
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT,
+                                     universal_newlines=True,
                                      creationflags=self.args.priority)
 
-        self.pipe_output = Thread2(target=pipe_video,
-                                   args=(self.filename, self.source_filter,
-                                         self.source_filter_threads, segment,
-                                         self.pipe.stdin),
-                                   daemon=True)
-        self.pipe_output.start()
-
-        stdout = io.TextIOWrapper(self.pipe.stdout, newline="")
         while True:
-          line = stdout.readline()
+          line = self.pipe.stdout.readline()
 
-          if not line and self.pipe.poll() is not None: break
+          if len(line) == 0 and self.pipe.poll() is not None:
+            break
 
           s_output.append(line.strip())
           match = re.match(re_aom_frame, line.strip())
@@ -207,14 +160,14 @@ class Worker:
         if self.pipe.returncode != 0:
           if self.stopped: return False
           self.update(-frame)
-          print(segment[0], segment[1], "|", " ".join(pass_cmd))
+          print(" ".join(vspipe_cmd), "|", " ".join(pass_cmd))
           print("\n" + "\n".join(s_output))
           return False
 
+        self.vspipe.kill()
         self.pipe.kill()
-        self.pipe_output.terminate()
+        self.vspipe = None
         self.pipe = None
-        self.pipe_output = None
 
     segment_output = os.path.join(self.args._working_dir,
                                   f"segment_{segment[2]}.ivf")
@@ -244,10 +197,10 @@ class Worker:
   def kill(self):
     self.stopped = True
 
+    if self.vspipe:
+      self.vspipe.kill()
     if self.pipe:
       self.pipe.kill()
-    if self.pipe_output:
-      self.pipe_output.terminate()
 
 
 class Progress:
@@ -438,26 +391,29 @@ def parse_args(args):
 
   core = vs.core
 
-  if args.use:
-    source_filter = get_attr(core, args.use, True)
+  args.vpy = os.path.splitext(args.input)[1] == ".vpy"
+  if args.vpy:
+    script = open(args.input, "r").read()
+    exec(script)
+    video = vs.get_output()
   else:
-    args.use, source_filter = get_source_filter(core)
-    print(f"Using {args.use} as source filter")
+    if args.use:
+      source_filter = get_attr(core, args.use, True)
+    else:
+      args.use, source_filter = get_source_filter(core)
+      print(f"Using {args.use} as source filter")
 
-  if os.path.exists(args.output) and not args.y:
-    try:
-      overwrite = input(f"{args.output} already exists. Overwrite? [y/N] ")
-    except KeyboardInterrupt:
-      print("Not overwriting, exiting.")
-      exit(0)
+    if os.path.exists(args.output) and not args.y:
+      try:
+        overwrite = input(f"{args.output} already exists. Overwrite? [y/N] ")
+      except KeyboardInterrupt:
+        print("Not overwriting, exiting.")
+        exit(0)
 
-    if overwrite.lower().strip() != "y":
-      print("Not overwriting, exiting.")
-      exit(0)
+      if overwrite.lower().strip() != "y":
+        print("Not overwriting, exiting.")
+        exit(0)
 
-  if "threads" in inspect.getfullargspec(source_filter).args:
-    video = source_filter(args.input, threads=args.source_filter_threads)
-  else:
     video = source_filter(args.input)
 
   num_frames = video.num_frames
@@ -483,21 +439,7 @@ def parse_args(args):
   else:
     args._keyframes = os.path.join(args._working_dir, "keyframes.txt")
 
-  return core, video, source_filter
-
-
-def pipe_video(filename, source_filter, threads, segment, pipe):
-  try:
-    if "threads" in inspect.getfullargspec(source_filter).args:
-      video = source_filter(filename, threads=threads)
-    else:
-      video = source_filter(filename)
-
-    video = video[segment[0]:segment[1] + 1]
-    video.output(cast(BinaryIO, pipe), y4m=True)
-    pipe.close()
-  except BrokenPipeError:
-    pass
+  print(str(video))
 
 
 def main():
@@ -519,14 +461,8 @@ def main():
   parser.add_argument("-u",
                       "--use",
                       help="VS source filter (ex. lsmas.LWLibavSource)")
-  parser.add_argument("-s",
-                      "--start",
-                      default=None,
-                      help="Input start frame (inclusive, starting from 0)")
-  parser.add_argument("-e",
-                      "--end",
-                      default=None,
-                      help="Input end frame (inclusive, starting from 0)")
+  parser.add_argument("-s", "--start", default=None, help="Input start frame")
+  parser.add_argument("-e", "--end", default=None, help="Input end frame")
   parser.add_argument("-y",
                       help="Skip warning / overwrite output",
                       action="store_true")
@@ -540,6 +476,7 @@ def main():
                       default=False,
                       action="store_true",
                       help="Mux with contents of input file")
+
   parser.add_argument("--keyframes",
                       default=None,
                       help="Path to keyframes file")
@@ -553,6 +490,7 @@ def main():
                       help="Do not delete temporary working directory.")
 
   parser.add_argument("--aomenc", default="aomenc", help="Path to aomenc")
+  parser.add_argument("--vspipe", default="vspipe", help="Path to vspipe")
   parser.add_argument("--mkvmerge",
                       default="mkvmerge",
                       help="Path to mkvmerge")
@@ -563,7 +501,6 @@ def main():
   parser.add_argument("--ranges",
                       default=None,
                       help="frame_n:arguments;frame_n2:arguments")
-  parser.add_argument("--source_filter_threads", default=1)
 
   args, aom_args = parser.parse_known_args()
 
@@ -583,6 +520,7 @@ def main():
       print("range:", part_frame, aom_args2)
 
   args.aomenc = require_exec(args.aomenc)
+  args.vspipe = require_exec(args.vspipe)
   args.mkvmerge = require_exec(args.mkvmerge)
   onepass_keyframes = require_exec("onepass_keyframes",
                                    (resource_filename,
@@ -591,10 +529,10 @@ def main():
   if args.copy_timestamps:
     args.mkvextract = require_exec(args.mkvextract)
 
-  core, video, source_filter = parse_args(args)
-  print(str(video))
+  parse_args(args)
 
   print("aomenc:", args.aomenc)
+  print("vspipe:", args.vspipe)
   print("mkvmerge:", args.mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
 
@@ -605,13 +543,39 @@ def main():
 
   progress_bar = Progress(args.num_frames)
 
-  v_r = video.height / video.width
-  v_w = round(min(1280, video.width / 1.5) / 2) * 2
-  v_h = round(min(v_r * 1280, video.height / 1.5) / 2) * 2
-  video_gop = core.resize.Point(video,
-                                width=v_w,
-                                height=v_h,
-                                format=vs.YUV420P8)
+  if args.vpy:
+    script_name = args.input
+
+    script_gop = """import vapoursynth as vs
+exec(open(r"{}", "r").read())
+v = vs.get_output()
+r = v.height / v.width
+w = min(1280, round(v.width / 1.5 / 2) * 2)
+h = min(round(r * 1280), round(v.height / 1.5 / 2) * 2)
+vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
+    script_gop = script_gop.format(args.input)
+  else:
+    script = """import vapoursynth as vs
+vs.core.resize.Point(vs.core.{}(r\"{}\"), format=vs.YUV420P8).set_output()"""
+    script = script.format(args.use, args.input)
+
+    script_name = os.path.join(args._working_dir, "video.vpy")
+
+    with open(script_name, "w+") as script_f:
+      script_f.write(script)
+
+    script_gop = """import vapoursynth as vs
+v = vs.core.{}(r\"{}\")
+r = v.height / v.width
+w = min(1280, round(v.width / 1.5 / 2) * 2)
+h = min(round(r * 1280), round(v.height / 1.5 / 2) * 2)
+vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
+    script_gop = script_gop.format(args.use, args.input)
+
+  script_name_gop = os.path.join(args._working_dir, "gop.vpy")
+
+  with open(script_name_gop, "w+") as script_f:
+    script_f.write(script_gop)
 
   if args.workers <= 0:
     print("Number of workers set to 0, only getting keyframes")
@@ -678,8 +642,7 @@ def main():
 
   for _ in range(args.workers):
     workers.append(
-      Worker(args, args.input, source_filter, args.source_filter_threads,
-             queue, aom_args, ranges, args.passes, update))
+      Worker(args, queue, aom_args, ranges, args.passes, script_name, update))
 
   if frame < args.num_frames - 1:
     offset = max(0, frame - 3)
@@ -688,36 +651,35 @@ def main():
     args.start = frame
 
   if args.start < args.end:
-    if args.end < args.num_frames - 1:
-      video_gop = video_gop[:args.end + 1]
+    get_gop = [args.vspipe, script_name_gop, "-y", "-"]
 
     if args.start > 0:
-      video_gop = video_gop[args.start:]
+      get_gop.extend(["-s", str(args.start)])
+
+    if args.end < args.num_frames - 1:
+      get_gop.extend(["-e", str(args.end)])
+
+    print(" ".join(get_gop))
 
     gop_lines = []
     try:
       with open(args._keyframes, "a+") as keyframes_file:
+        vspipe_pipe = subprocess.Popen(get_gop,
+                                       stdout=subprocess.PIPE,
+                                       creationflags=CREATE_NO_WINDOW)
+
         pipe = subprocess.Popen(onepass_keyframes,
-                                stdin=subprocess.PIPE,
+                                stdin=vspipe_pipe.stdout,
+                                stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,
+                                universal_newlines=True,
                                 creationflags=CREATE_NO_WINDOW)
 
-        def gop_pipe(video, pipe):
-          try:
-            video.output(cast(BinaryIO, pipe), y4m=True)
-            pipe.close()
-          except BrokenPipeError:
-            pass
-
-        pipe_output = Thread2(target=gop_pipe,
-                              args=(video_gop, pipe.stdin),
-                              daemon=True)
-        pipe_output.start()
-
         while True:
-          line = pipe.stderr.readline().decode()
+          line = pipe.stderr.readline()
 
-          if not line and pipe.poll() is not None: break
+          if len(line) == 0 and pipe.poll() is not None:
+            break
 
           output_log.append(line)
 
@@ -746,15 +708,15 @@ def main():
       print(traceback.format_exc())
       exit(1)
     finally:
+      vspipe_pipe.kill()
       pipe.kill()
-      pipe_output.terminate()
       if pipe.returncode != 0:
         for worker in workers:
           worker.kill()
         queue.clear()
-        if pipe.returncode != None:
-          print("".join(output_log))
-          exit(1)
+        print()
+        print("".join(output_log))
+        exit(1)
 
   if args.num_frames > start:
     while args.num_frames - start > args.kf_max_dist * 2:
@@ -801,6 +763,10 @@ def main():
       if args.passes == 2:
         fpf = f"{os.path.splitext(segment)[0]}.log"
         os.remove(fpf)
+
+    if not args.vpy:
+      os.remove(script_name)
+      os.remove(script_name_gop)
 
     if not args.keyframes:
       os.remove(args._keyframes)
