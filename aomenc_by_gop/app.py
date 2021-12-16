@@ -651,7 +651,7 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
     args.start = frame
 
   if args.start < args.end:
-    get_gop = [args.vspipe, script_name_gop, "-y", "-"]
+    get_gop = [args.vspipe, script_name_gop, "-c", "y4m", "-"]
 
     if args.start > 0:
       get_gop.extend(["-s", str(args.start)])
