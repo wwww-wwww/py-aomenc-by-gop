@@ -122,6 +122,10 @@ class Worker:
         segment_fpf = os.path.join(self.args._working_dir,
                                    f"segment_{segment[2]}.log")
         pass_cmd.append(f"--fpf={segment_fpf}")
+        if p == 0:
+          pass_cmd = [
+            a for a in pass_cmd if not a.startswith("--denoise-noise-level")
+          ]
 
       frame = 0
       s_output = []
