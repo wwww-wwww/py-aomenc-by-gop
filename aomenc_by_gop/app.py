@@ -31,38 +31,28 @@ class Queue:
   def __init__(self, offset_start):
     self.queue = []
     self.lock = Lock()
-    self.empty_lock = Lock()
-    self.empty = Condition(self.empty_lock)
+    self.empty = Condition(self.lock)
     self.update = None
     self.offset_start = offset_start or 0
 
   def acquire(self, worker):
-    with self.empty_lock:
-      while len(self.queue) == 0:
+    with self.lock:
+      if len(self.queue) == 0:
         self.empty.wait()
 
-    with self.lock:
       if len(self.queue) == 0:
         return None
       else:
+        worker.working.clear()
+        job = self.queue.pop(0)
         if self.update:
           self.update()
-        worker.working.clear()
-        pop = self.queue.pop(0)
-        if len(self.queue) == 0:
-          with self.empty_lock:
-            self.empty.notify()
-        return pop
+        return job
 
   def wait_empty(self):
-    with self.empty_lock:
+    with self.lock:
       while len(self.queue) > 0:
         self.empty.wait()
-
-  def clear(self):
-    with self.lock:
-      self.queue.clear()
-      self.update()
 
   def submit(self, start, end, i):
     segment = (self.offset_start + start, self.offset_start + end, i)
@@ -71,8 +61,7 @@ class Queue:
       self.queue.sort(key=lambda x: x[0] - x[1])
       if self.update:
         self.update()
-      with self.empty_lock:
-        self.empty.notify()
+      self.empty.notify()
 
 
 class Worker:
@@ -90,6 +79,9 @@ class Worker:
     self.working.set()
     self.stopped = False
     self.segment = None
+    self.state_lock = Lock()
+    self.state_ev = Condition(self.state_lock)
+    self.starting = False
     Thread(target=self.loop, daemon=True).start()
 
   def encode(self, segment):
@@ -141,14 +133,19 @@ class Worker:
                                      stderr=subprocess.STDOUT,
                                      universal_newlines=True,
                                      creationflags=self.args.priority)
+        with self.state_lock:
+          self.starting = False
+          self.state_ev.notify_all()
 
         while True:
-          line = self.pipe.stdout.readline()
+          line = self.pipe.stdout.readline().strip()
 
           if len(line) == 0 and self.pipe.poll() is not None:
             break
 
-          s_output.append(line.strip())
+          if not line: continue
+
+          s_output.append(line)
           match = re.match(re_aom_frame, line.strip())
           if match:
             current_pass = int(match.group(1))
@@ -164,14 +161,15 @@ class Worker:
         if self.pipe.returncode != 0:
           if self.stopped: return False
           self.update(-frame)
-          print(" ".join(vspipe_cmd), "|", " ".join(pass_cmd))
-          print("\n" + "\n".join(s_output))
+          if s_output:
+            print(" ".join(vspipe_cmd), "|", " ".join(pass_cmd))
+            print("\n" + "\n".join(s_output))
           return False
 
-        self.vspipe.kill()
         self.pipe.kill()
-        self.vspipe = None
+        self.vspipe.kill()
         self.pipe = None
+        self.vspipe = None
 
     segment_output = os.path.join(self.args._working_dir,
                                   f"segment_{segment[2]}.ivf")
@@ -180,7 +178,10 @@ class Worker:
 
   def _encode(self, segment):
     for _ in range(3):
+      with self.state_lock:
+        self.starting = True
       if self.encode(segment): return True
+      if self.stopped: return True
 
     return False
 
@@ -190,21 +191,24 @@ class Worker:
         self.segment = self.queue.acquire(self)
         if self.segment:
           self.update()
-          self.working.clear()
           if not self._encode(self.segment):
-            pass  # exit
+            exit(1)  # catastrophic failure
       finally:
         self.segment = None
         self.update()
-      self.working.set()
+        self.working.set()
 
   def kill(self):
+    with self.state_lock:
+      if self.starting:
+        self.state_ev.wait()
+
     self.stopped = True
 
-    if self.vspipe:
-      self.vspipe.kill()
     if self.pipe:
       self.pipe.kill()
+    if self.vspipe:
+      self.vspipe.kill()
 
 
 class Progress:
@@ -287,8 +291,6 @@ def concat(args, n_segments):
     print("Extracting timestamps for track", trackid)
     path_timestamps = os.path.join(args._working_dir, "timestamps.txt")
 
-    merge += ["--timestamps", f"0:{path_timestamps}"]
-
     extract = [
       args.mkvextract,
       args.input,
@@ -309,6 +311,18 @@ def concat(args, n_segments):
       with open(path_timestamps, "w+") as f:
         f.write(lines[0] + "\n")
         f.writelines([str(line) + "\n" for line in ts])
+
+  if args.timestamps:
+    path_timestamps = args.timestamps
+
+  if args.timestamps or args.copy_timestamps:
+    merge += ["--timestamps", f"0:{path_timestamps}"]
+
+  if args.fps:
+    merge += [
+      "--default-duration", f"0:{args.fps}fps",
+      "--fix-bitstream-timing-information", "0"
+    ]
 
   merge += [out]
 
@@ -476,6 +490,10 @@ def main():
                       action="store_true",
                       help="Copy timestamps from input file.\n" \
                       "Support for variable frame rate")
+  parser.add_argument("--timestamps", default=None, help="Timestamps file")
+  parser.add_argument("--fps",
+                      default=None,
+                      help="Output framerate (ex. 24000/1001)")
   parser.add_argument("--mux",
                       default=False,
                       action="store_true",
@@ -501,13 +519,13 @@ def main():
   parser.add_argument("--mkvextract",
                       default="mkvextract",
                       help="Path to mkvmerge. Required for VFR")
-
   parser.add_argument("--ranges",
                       default=None,
                       help="frame_n:arguments;frame_n2:arguments")
 
   args, aom_args = parser.parse_known_args()
 
+  # these ranges should be moved to the job queue
   ranges = []
   if args.ranges:
     for part_s in args.ranges.split(";"):
@@ -530,10 +548,26 @@ def main():
                                    (resource_filename,
                                     ("aomenc_by_gop", onepass_keyframes)))
 
+  parse_args(args)
+
   if args.copy_timestamps:
+    if args.fps:
+      print("Can't have --fps and --copy-timestamps")
+      exit(1)
+    if args.timestamps:
+      print("Can't have --timestamps and --copy-timestamps")
+      exit(1)
     args.mkvextract = require_exec(args.mkvextract)
 
-  parse_args(args)
+  if args.fps:
+    if args.timestamps:
+      print("Can't have --fps and --timestamps")
+      exit(1)
+    print("Output framerate:", args.fps)
+
+  if args.timestamps and not os.path.isfile(args.timestamps):
+    print("Timestamps file not found:", args.timestamps)
+    exit(1)
 
   print("aomenc:", args.aomenc)
   print("vspipe:", args.vspipe)
@@ -541,6 +575,9 @@ def main():
   print("onepass_keyframes:", onepass_keyframes)
 
   print("Encoder arguments:", " ".join(aom_args))
+
+  if "--enable-keyframe-filtering=0" not in aom_args:
+    print("WARNING: --enable-keyframe-filtering=0 is not set")
 
   if args.priority and CREATE_NO_WINDOW:
     args.priority = priorities[str(args.priority)]
@@ -663,8 +700,6 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
     if args.end < args.num_frames - 1:
       get_gop.extend(["-e", str(args.end)])
 
-    print(" ".join(get_gop))
-
     gop_lines = []
     try:
       with open(args._keyframes, "a+") as keyframes_file:
@@ -708,18 +743,23 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
 
     except KeyboardInterrupt:
       print("\nCancelled")
+      graceful_exit = True
     except:
       print(traceback.format_exc())
-      exit(1)
     finally:
       vspipe_pipe.kill()
       pipe.kill()
       if pipe.returncode != 0:
         for worker in workers:
           worker.kill()
-        queue.clear()
-        print()
-        print("".join(output_log))
+
+        for worker in workers:
+          worker.working.wait()
+
+        if "graceful_exit" not in locals():
+          print()
+          print(" ".join(get_gop))
+          print("".join(output_log))
         exit(1)
 
   if args.num_frames > start:
@@ -751,12 +791,9 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
     # remove temporary files used by recursive concat
     tmp_files = [
       os.path.join(args._working_dir, f"{args.output}.tmp0.mkv"),
-      os.path.join(args._working_dir, f"{args.output}.tmp1.mkv")
+      os.path.join(args._working_dir, f"{args.output}.tmp1.mkv"),
+      os.path.join(args._working_dir, "timestamps.txt")
     ]
-
-    timestamps = os.path.join(args._working_dir, "timestamps.txt")
-    if os.path.isfile(timestamps):
-      os.remove(timestamps)
 
     for file in tmp_files:
       if os.path.exists(file):
