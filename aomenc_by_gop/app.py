@@ -47,6 +47,8 @@ class Queue:
         job = self.queue.pop(0)
         if self.update:
           self.update()
+        if len(self.queue) == 0:
+          self.empty.notify()
         return job
 
   def wait_empty(self):
@@ -780,9 +782,17 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
     print("Completed getting keyframes")
     return
 
-  queue.wait_empty()
-  for worker in workers:
-    worker.working.wait()
+  try:
+    queue.wait_empty()
+    for worker in workers:
+      worker.working.wait()
+  except KeyboardInterrupt:
+    print("\nCancelled")
+    for worker in workers:
+      worker.kill()
+    for worker in workers:
+      worker.working.wait()
+    exit(1)
 
   segments = concat(args, n[0])
 
