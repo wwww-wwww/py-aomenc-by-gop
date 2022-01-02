@@ -28,6 +28,32 @@ priorities = {
 }
 
 
+class DefaultArgs:
+  def __init__(self, **kwargs):
+    self.input = None
+    self.output = None
+    self.workers = 4
+    self.passes = 2
+    self.kf_max_dist = 240
+    self.use = "lsmas.LWLibavSource"
+    self.start = None
+    self.end = None
+    self.y = False
+    self.priority = 0
+    self.copy_timestamps = False
+    self.timestamps = None
+    self.fps = None
+    self.mux = False
+    self.keyframes = None
+    self.working_dir = None
+    self.keep = False
+    self.aomenc = "aomenc"
+    self.vspipe = "vspipe"
+    self.mkvmerge = "mkvmerge"
+    self.mkvextract = "mkvextract"
+    self.__dict__.update(kwargs)
+
+
 class Queue:
   def __init__(self, offset_start):
     self.queue = []
@@ -463,7 +489,18 @@ def parse_args(args):
   print(str(video))
 
 
-def encode(args, aom_args, ranges):
+def encode(args, aom_args, in_ranges):
+  ranges = []
+  for r in in_ranges:
+    (frame, part_aom_args) = r
+    args2_s = [arg.split("=")[0] for arg in part_aom_args]
+    aom_args2 = [
+      arg for arg in aom_args
+      if not any(arg.startswith(arg2) for arg2 in args2_s)
+    ]
+    aom_args2 += part_aom_args
+    ranges.append((frame, aom_args2))
+
   args.aomenc = require_exec(args.aomenc)
   args.vspipe = require_exec(args.vspipe)
   args.mkvmerge = require_exec(args.mkvmerge)
@@ -754,7 +791,7 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
   print("Completed")
 
 
-if __name__ == "__main__":
+def main():
   parser = argparse.ArgumentParser(add_help=False)
   parser.add_argument("--help", action="help")
 
@@ -819,13 +856,11 @@ if __name__ == "__main__":
       part = part_s.split(":")
       part_frame = int(part[0])
       part_aom_args = (":".join(part[1:])).split(" ")
-      args2_s = [arg.split("=")[0] for arg in part_aom_args]
-      aom_args2 = [
-        arg for arg in aom_args
-        if not any(arg.startswith(arg2) for arg2 in args2_s)
-      ]
-      aom_args2 += part_aom_args
-      ranges.append((part_frame, aom_args2))
-      print("range:", part_frame, aom_args2)
+      ranges.append((part_frame, part_aom_args))
+      print("range:", part_frame, part_aom_args)
 
   encode(args, aom_args, ranges)
+
+
+if __name__ == "__main__":
+  main()
