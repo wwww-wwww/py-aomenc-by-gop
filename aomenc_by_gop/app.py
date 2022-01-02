@@ -1,6 +1,7 @@
 import argparse, os, platform, re, shutil, subprocess, sys, tempfile, time, traceback
 import vapoursynth as vs
 from threading import Condition, Event, Lock, Thread
+from pkg_resources import resource_filename
 
 re_keyframe = r"f *([0-9]+):([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
@@ -462,90 +463,16 @@ def parse_args(args):
   print(str(video))
 
 
-def main():
+def encode(args, aom_args, ranges):
+  args.aomenc = require_exec(args.aomenc)
+  args.vspipe = require_exec(args.vspipe)
+  args.mkvmerge = require_exec(args.mkvmerge)
+
   if sys.platform == "win32" or sys.platform == "cygwin":
     onepass_keyframes = "bin/win64/onepass_keyframes.exe"
   else:
     onepass_keyframes = "bin/linux_amd64/onepass_keyframes"
 
-  from pkg_resources import resource_filename
-
-  parser = argparse.ArgumentParser(add_help=False)
-  parser.add_argument("--help", action="help")
-
-  parser.add_argument("-i", "--input", required=True)
-  parser.add_argument("output")
-  parser.add_argument("--workers", default=4)
-  parser.add_argument("--passes", default=2)
-  parser.add_argument("--kf-max-dist", default=240)
-  parser.add_argument("-u",
-                      "--use",
-                      help="VS source filter (ex. lsmas.LWLibavSource)")
-  parser.add_argument("-s", "--start", default=None, help="Input start frame")
-  parser.add_argument("-e", "--end", default=None, help="Input end frame")
-  parser.add_argument("-y",
-                      help="Skip warning / overwrite output",
-                      action="store_true")
-  parser.add_argument("--priority", default=0, help="Process priority")
-  parser.add_argument("--copy-timestamps",
-                      default=False,
-                      action="store_true",
-                      help="Copy timestamps from input file.\n" \
-                      "Support for variable frame rate")
-  parser.add_argument("--timestamps", default=None, help="Timestamps file")
-  parser.add_argument("--fps",
-                      default=None,
-                      help="Output framerate (ex. 24000/1001)")
-  parser.add_argument("--mux",
-                      default=False,
-                      action="store_true",
-                      help="Mux with contents of input file")
-
-  parser.add_argument("--keyframes",
-                      default=None,
-                      help="Path to keyframes file")
-  parser.add_argument("--working-dir",
-                      default=None,
-                      help="Path to working directory.\n" \
-                      "Allows resuming and does not remove files after completion")
-  parser.add_argument("--keep",
-                      default=False,
-                      action="store_true",
-                      help="Do not delete temporary working directory.")
-
-  parser.add_argument("--aomenc", default="aomenc", help="Path to aomenc")
-  parser.add_argument("--vspipe", default="vspipe", help="Path to vspipe")
-  parser.add_argument("--mkvmerge",
-                      default="mkvmerge",
-                      help="Path to mkvmerge")
-  parser.add_argument("--mkvextract",
-                      default="mkvextract",
-                      help="Path to mkvmerge. Required for VFR")
-  parser.add_argument("--ranges",
-                      default=None,
-                      help="frame_n:arguments;frame_n2:arguments")
-
-  args, aom_args = parser.parse_known_args()
-
-  # these ranges should be moved to the job queue
-  ranges = []
-  if args.ranges:
-    for part_s in args.ranges.split(";"):
-      part = part_s.split(":")
-      part_frame = int(part[0])
-      part_aom_args = (":".join(part[1:])).split(" ")
-      args2_s = [arg.split("=")[0] for arg in part_aom_args]
-      aom_args2 = [
-        arg for arg in aom_args
-        if not any(arg.startswith(arg2) for arg2 in args2_s)
-      ]
-      aom_args2 += part_aom_args
-      ranges.append((part_frame, aom_args2))
-      print("range:", part_frame, aom_args2)
-
-  args.aomenc = require_exec(args.aomenc)
-  args.vspipe = require_exec(args.vspipe)
-  args.mkvmerge = require_exec(args.mkvmerge)
   onepass_keyframes = require_exec("onepass_keyframes",
                                    (resource_filename,
                                     ("aomenc_by_gop", onepass_keyframes)))
@@ -828,4 +755,77 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
 
 
 if __name__ == "__main__":
-  main()
+  parser = argparse.ArgumentParser(add_help=False)
+  parser.add_argument("--help", action="help")
+
+  parser.add_argument("-i", "--input", required=True)
+  parser.add_argument("output")
+  parser.add_argument("--workers", default=4)
+  parser.add_argument("--passes", default=2)
+  parser.add_argument("--kf-max-dist", default=240)
+  parser.add_argument("-u",
+                      "--use",
+                      help="VS source filter (ex. lsmas.LWLibavSource)")
+  parser.add_argument("-s", "--start", default=None, help="Input start frame")
+  parser.add_argument("-e", "--end", default=None, help="Input end frame")
+  parser.add_argument("-y",
+                      help="Skip warning / overwrite output",
+                      action="store_true")
+  parser.add_argument("--priority", default=0, help="Process priority")
+  parser.add_argument("--copy-timestamps",
+                      default=False,
+                      action="store_true",
+                      help="Copy timestamps from input file.\n" \
+                      "Support for variable frame rate")
+  parser.add_argument("--timestamps", default=None, help="Timestamps file")
+  parser.add_argument("--fps",
+                      default=None,
+                      help="Output framerate (ex. 24000/1001)")
+  parser.add_argument("--mux",
+                      default=False,
+                      action="store_true",
+                      help="Mux with contents of input file")
+
+  parser.add_argument("--keyframes",
+                      default=None,
+                      help="Path to keyframes file")
+  parser.add_argument("--working-dir",
+                      default=None,
+                      help="Path to working directory.\n" \
+                      "Allows resuming and does not remove files after completion")
+  parser.add_argument("--keep",
+                      default=False,
+                      action="store_true",
+                      help="Do not delete temporary working directory.")
+
+  parser.add_argument("--aomenc", default="aomenc", help="Path to aomenc")
+  parser.add_argument("--vspipe", default="vspipe", help="Path to vspipe")
+  parser.add_argument("--mkvmerge",
+                      default="mkvmerge",
+                      help="Path to mkvmerge")
+  parser.add_argument("--mkvextract",
+                      default="mkvextract",
+                      help="Path to mkvmerge. Required for VFR")
+  parser.add_argument("--ranges",
+                      default=None,
+                      help="frame_n:arguments;frame_n2:arguments")
+
+  args, aom_args = parser.parse_known_args()
+
+  # these ranges should be used when generating job queue
+  ranges = []
+  if args.ranges:
+    for part_s in args.ranges.split(";"):
+      part = part_s.split(":")
+      part_frame = int(part[0])
+      part_aom_args = (":".join(part[1:])).split(" ")
+      args2_s = [arg.split("=")[0] for arg in part_aom_args]
+      aom_args2 = [
+        arg for arg in aom_args
+        if not any(arg.startswith(arg2) for arg2 in args2_s)
+      ]
+      aom_args2 += part_aom_args
+      ranges.append((part_frame, aom_args2))
+      print("range:", part_frame, aom_args2)
+
+  encode(args, aom_args, ranges)
