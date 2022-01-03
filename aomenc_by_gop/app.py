@@ -620,7 +620,11 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
     match = re.match(re_keyframe, line.strip())
     if not match: return False, frame, start, 0
 
-    frame = int(match.group(1)) + offset
+    frame = int(match.group(1))
+    if frame >= args.num_frames:
+      return False, frame, start, 0
+
+    frame += offset
     frame_type = int(match.group(2))
 
     while frame - start > args.kf_max_dist * 2:
