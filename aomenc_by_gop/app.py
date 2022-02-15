@@ -144,7 +144,7 @@ class Worker:
           new_cq = int(cq_arg[0][1]) + extra_arg[1]
           aom_args = replace_args(aom_args, [f"--cq-level={new_cq}"])
 
-    if len(ranges[-1]) > 2 and ranges[-1][2]:
+    if ranges and len(ranges[-1]) > 2 and ranges[-1][2]:
       aom_args = replace_args(aom_args, ranges[-1][1])
 
     vspipe_cmd = [
