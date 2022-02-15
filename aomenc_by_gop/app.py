@@ -1,7 +1,10 @@
-import argparse, os, platform, re, shutil, subprocess, sys, tempfile, time, traceback
+import argparse, json, os, platform, re, shutil, subprocess, sys, tempfile
+import time, traceback
 import vapoursynth as vs
-from threading import Condition, Event, Lock, Thread
+from functools import partial
 from pkg_resources import resource_filename
+from threading import Condition, Event, Lock, Thread
+from typing import List
 
 re_keyframe = r"f *([0-9]+):([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
@@ -51,6 +54,9 @@ class DefaultArgs:
     self.vspipe = "vspipe"
     self.mkvmerge = "mkvmerge"
     self.mkvextract = "mkvextract"
+    self.webm = False
+    self.darkboost = False
+    self.darkboost_file = None
     self.__dict__.update(kwargs)
 
 
@@ -83,14 +89,23 @@ class Queue:
       while len(self.queue) > 0:
         self.empty.wait()
 
-  def submit(self, start, end, i):
-    segment = (self.offset_start + start, self.offset_start + end, i)
+  def submit(self, start, end, i, args):
+    segment = (self.offset_start + start, self.offset_start + end, i, args)
     with self.lock:
       self.queue.append(segment)
       self.queue.sort(key=lambda x: x[0] - x[1])
       if self.update:
         self.update()
       self.empty.notify()
+
+
+def replace_args(args1: List[str], args2: List[str]) -> List[str]:
+  args2_s = [arg.split("=")[0] for arg in args2]
+  new_args = [
+    arg for arg in args1 if not any(arg.startswith(arg2) for arg2 in args2_s)
+  ]
+  new_args += args2
+  return new_args
 
 
 class Worker:
@@ -114,11 +129,23 @@ class Worker:
     Thread(target=self.loop, daemon=True).start()
 
   def encode(self, segment):
+    aom_args = self.aom_args
+
+    # todo: move this into add_job
     ranges = [r for r in self.ranges if r[0] <= segment[0]]
     if ranges:
-      aom_args = ranges[-1][1]
-    else:
-      aom_args = self.aom_args
+      aom_args = replace_args(aom_args, ranges[-1][1])
+
+    for extra_arg in segment[3]:
+      if extra_arg[0] == "cq":
+        cq_arg = [arg.split("=") for arg in aom_args]
+        cq_arg = [arg for arg in cq_arg if arg[0] == "--cq-level"]
+        if cq_arg:
+          new_cq = int(cq_arg[0][1]) + extra_arg[1]
+          aom_args = replace_args(aom_args, [f"--cq-level={new_cq}"])
+
+    if len(ranges[-1]) > 2 and ranges[-1][2]:
+      aom_args = replace_args(aom_args, ranges[-1][1])
 
     vspipe_cmd = [
       self.args.vspipe, self.script, "-c", "y4m", "-", "-s",
@@ -126,12 +153,13 @@ class Worker:
       str(segment[1])
     ]
 
-    segment_tmp = tempfile.mktemp(dir=self.args._working_dir, suffix=".ivf")
+    segment_tmp = tempfile.mktemp(dir=self.args._working_dir,
+                                  suffix=f".{self.args.segment_ext}")
 
     aomenc_cmd = [
       self.args.aomenc,
       "-",
-      "--ivf",
+      f"--{self.args.segment_ext}",
       "-o",
       segment_tmp,
       f"--passes={self.passes}",
@@ -200,8 +228,8 @@ class Worker:
         self.pipe = None
         self.vspipe = None
 
-    segment_output = os.path.join(self.args._working_dir,
-                                  f"segment_{segment[2]}.ivf")
+    segment_output = os.path.join(
+      self.args._working_dir, f"segment_{segment[2]}.{self.args.segment_ext}")
     shutil.move(segment_tmp, segment_output)
     return True
 
@@ -284,9 +312,40 @@ class Progress:
     print(line + padding, end="\r")
 
 
+class DarkBoost:
+  def __init__(self, clip: vs.VideoNode, cachefile: str):
+    self.state = None
+    self.cache = {}
+    self.cachefile = cachefile
+    if os.path.exists(self.cachefile):
+      self.cache = json.load(open(self.cachefile, "r"))
+
+    clip = clip.std.SplitPlanes()[0]
+    clip = clip.resize.Bicubic(format=vs.GRAY8)
+    clip = clip.std.Levels(min_in=16, max_in=235, min_out=0, max_out=255)
+    clip = clip.std.PlaneStats()
+    self.clip = clip
+
+    def darkness(n, state, f):
+      state.state = f.props["PlaneStatsAverage"] * 255
+      return state.clip
+
+    self.clip_eval = clip.std.FrameEval(partial(darkness, state=self),
+                                        prop_src=clip)
+
+  def get_level(self, frame: int) -> float:
+    key = str(frame)
+    if key not in self.cache:
+      self.clip_eval.get_frame(frame)
+      self.cache[key] = self.state
+      json.dump(self.cache, open(self.cachefile, "w+"), indent=2)
+
+    return self.cache[key]
+
+
 def concat(args, n_segments):
   print("\nConcatenating")
-  segments = [f"segment_{n + 1}.ivf" for n in range(n_segments)]
+  segments = [f"segment_{n + 1}.{args.segment_ext}" for n in range(n_segments)]
   segments = [os.path.join(args._working_dir, segment) for segment in segments]
 
   for segment in segments:
@@ -427,6 +486,7 @@ def require_exec(file, default=None):
 
 
 def parse_args(args):
+  args.segment_ext = "webm" if args.webm else "ivf"
   args.input = os.path.abspath(args.input)
   args.workers = int(args.workers)
   args.passes = int(args.passes)
@@ -438,36 +498,31 @@ def parse_args(args):
 
   core = vs.core
 
-  args.vpy = os.path.splitext(args.input)[1] == ".vpy"
-  if args.vpy:
-    script = open(args.input, "r").read()
-    exec(script)
-    video = vs.get_output()
+  if args.use:
+    source_filter = get_attr(core, args.use, True)
   else:
-    if args.use:
-      source_filter = get_attr(core, args.use, True)
-    else:
-      args.use, source_filter = get_source_filter(core)
-      print(f"Using {args.use} as source filter")
+    args.use, source_filter = get_source_filter(core)
+    print(f"Using {args.use} as source filter")
 
-    if os.path.exists(args.output) and not args.y:
-      try:
-        overwrite = input(f"{args.output} already exists. Overwrite? [y/N] ")
-      except KeyboardInterrupt:
-        print("Not overwriting, exiting.")
-        exit(0)
+  if os.path.exists(args.output) and not args.y:
+    try:
+      overwrite = input(f"{args.output} already exists. Overwrite? [y/N] ")
+    except KeyboardInterrupt:
+      print("Not overwriting, exiting.")
+      exit(0)
 
-      if overwrite.lower().strip() != "y":
-        print("Not overwriting, exiting.")
-        exit(0)
+    if overwrite.lower().strip() != "y":
+      print("Not overwriting, exiting.")
+      exit(0)
 
-    video = source_filter(args.input)
+  video = source_filter(args.input)
 
   num_frames = video.num_frames
 
   args._start = args.start
   args.start = int(args.start or 0)
   args.end = int(args.end or num_frames - 1)
+  video = video[args.start:args.end + 1]
 
   if args.end >= num_frames or (args.start and args.end < args.start):
     raise Exception("End frame out of bounds")
@@ -486,21 +541,10 @@ def parse_args(args):
   else:
     args._keyframes = os.path.join(args._working_dir, "keyframes.txt")
 
-  print(str(video))
+  return video
 
 
-def encode(args, aom_args, in_ranges):
-  ranges = []
-  for r in in_ranges:
-    (frame, part_aom_args) = r
-    args2_s = [arg.split("=")[0] for arg in part_aom_args]
-    aom_args2 = [
-      arg for arg in aom_args
-      if not any(arg.startswith(arg2) for arg2 in args2_s)
-    ]
-    aom_args2 += part_aom_args
-    ranges.append((frame, aom_args2))
-
+def encode(args, aom_args, ranges):
   args.aomenc = require_exec(args.aomenc)
   args.vspipe = require_exec(args.vspipe)
   args.mkvmerge = require_exec(args.mkvmerge)
@@ -514,7 +558,8 @@ def encode(args, aom_args, in_ranges):
                                    (resource_filename,
                                     ("aomenc_by_gop", onepass_keyframes)))
 
-  parse_args(args)
+  clip = parse_args(args)
+  print(str(clip))
 
   if args.copy_timestamps:
     if args.fps:
@@ -535,6 +580,14 @@ def encode(args, aom_args, in_ranges):
     print("Timestamps file not found:", args.timestamps)
     exit(1)
 
+  if args.darkboost:
+    if args.darkboost_file:
+      darkboost_path = args.darkboost_file
+    else:
+      filename = os.path.basename(args.input) + "_darkboost.json"
+      darkboost_path = os.path.join(os.path.dirname(args.input), filename)
+    darkboost = DarkBoost(clip, darkboost_path)
+
   print("aomenc:", args.aomenc)
   print("vspipe:", args.vspipe)
   print("mkvmerge:", args.mkvmerge)
@@ -550,34 +603,22 @@ def encode(args, aom_args, in_ranges):
 
   progress_bar = Progress(args.num_frames)
 
-  if args.vpy:
-    script_name = args.input
+  script = """import vapoursynth as vs
+vs.core.{}(r\"{}\").resize.Point(format=vs.YUV420P8).set_output()"""
+  script = script.format(args.use, args.input)
 
-    script_gop = """import vapoursynth as vs
-exec(open(r"{}", "r").read())
-v = vs.get_output()
-r = v.height / v.width
-w = min(1280, round(v.width / 1.5 / 2) * 2)
-h = min(round(r * 1280), round(v.height / 1.5 / 2) * 2)
-vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
-    script_gop = script_gop.format(args.input)
-  else:
-    script = """import vapoursynth as vs
-vs.core.resize.Point(vs.core.{}(r\"{}\"), format=vs.YUV420P8).set_output()"""
-    script = script.format(args.use, args.input)
+  script_name = os.path.join(args._working_dir, "video.vpy")
 
-    script_name = os.path.join(args._working_dir, "video.vpy")
+  with open(script_name, "w+") as script_f:
+    script_f.write(script)
 
-    with open(script_name, "w+") as script_f:
-      script_f.write(script)
-
-    script_gop = """import vapoursynth as vs
+  script_gop = """import vapoursynth as vs
 v = vs.core.{}(r\"{}\")
 r = v.height / v.width
 w = min(1280, round(v.width / 1.5 / 2) * 2)
 h = min(round(r * 1280), round(v.height / 1.5 / 2) * 2)
-vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
-    script_gop = script_gop.format(args.use, args.input)
+v.resize.Point(width=w, height=h, format=vs.YUV420P8).set_output()"""
+  script_gop = script_gop.format(args.use, args.input)
 
   script_name_gop = os.path.join(args._working_dir, "gop.vpy")
 
@@ -609,12 +650,22 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
 
   def add_job(start_frame, end_frame):
     n[0] += 1
-    segment_output = os.path.join(args._working_dir, f"segment_{n[0]}.ivf")
+    segment_output = os.path.join(args._working_dir,
+                                  f"segment_{n[0]}.{args.segment_ext}")
     if os.path.isfile(segment_output):
       progress_bar._n -= end_frame - start_frame
       progress_bar.update(end_frame - start_frame)
     else:
-      queue.submit(start_frame, end_frame - 1, n[0])
+      segment_args = []
+      if args.darkboost:
+        level = darkboost.get_level((start_frame + end_frame) // 2)
+
+        if level < 32:
+          segment_args.append(("cq", -2))
+        elif level < 64:
+          segment_args.append(("cq", -1))
+
+      queue.submit(start_frame, end_frame - 1, n[0], segment_args)
 
   def parse_keyframe(line, frame, start):
     match = re.match(re_keyframe, line.strip())
@@ -766,11 +817,13 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
 
   if not args.working_dir and not args.keep:
     print("Cleaning up")
-    # remove temporary files used by recursive concat
+    # remove temporary files
     tmp_files = [
       os.path.join(args._working_dir, f"{args.output}.tmp0.mkv"),
       os.path.join(args._working_dir, f"{args.output}.tmp1.mkv"),
-      os.path.join(args._working_dir, "timestamps.txt")
+      os.path.join(args._working_dir, "gop.vpy"),
+      os.path.join(args._working_dir, "video.vpy"),
+      os.path.join(args._working_dir, "timestamps.txt"),
     ]
 
     for file in tmp_files:
@@ -782,10 +835,6 @@ vs.core.resize.Point(v, width=w, height=h, format=vs.YUV420P8).set_output()"""
       if args.passes == 2:
         fpf = f"{os.path.splitext(segment)[0]}.log"
         os.remove(fpf)
-
-    if not args.vpy:
-      os.remove(script_name)
-      os.remove(script_name_gop)
 
     if not args.keyframes:
       os.remove(args._keyframes)
@@ -851,9 +900,15 @@ def main():
                       default=None,
                       help="frame_n:arguments;frame_n2:arguments")
 
+  parser.add_argument("--webm", default=False, action="store_true")
+
+  parser.add_argument("--darkboost", default=False, action="store_true")
+  parser.add_argument("--darkboost-file",
+                      default=None,
+                      help="Path to darkboost cache")
+
   args, aom_args = parser.parse_known_args()
 
-  # these ranges should be used when generating job queue
   ranges = []
   if args.ranges:
     for part_s in args.ranges.split(";"):

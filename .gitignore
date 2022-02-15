@@ -1,4 +1,3 @@
-
 *.pyc
 *.log
 *.ivf
@@ -9,3 +8,11 @@
 *.webm
 *.json
 *.log
+build/
+.vspreview/
+.mypy_cache/
+__pycache__/
+aomenc-by-gop-*/
+aomenc_by_gop.egg-info/
+dist/
+.vscode/
