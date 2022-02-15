@@ -27,11 +27,13 @@ Runs aomenc in parallel per group of pictures
 
 ```
 aomenc-by-gop --help
-usage: aomenc-by-gop [--help] -i INPUT [--workers WORKERS] [--passes PASSES] [--kf-max-dist KF_MAX_DIST] [-u USE]
-                     [-s START] [-e END] [-y] [--priority PRIORITY] [--copy-timestamps] [--timestamps TIMESTAMPS]
-                     [--fps FPS] [--mux] [--keyframes KEYFRAMES] [--working-dir WORKING_DIR] [--keep]
-                     [--aomenc AOMENC] [--vspipe VSPIPE] [--mkvmerge MKVMERGE] [--mkvextract MKVEXTRACT]
-                     [--ranges RANGES] [--webm] [--darkboost] [--darkboost-file DARKBOOST_FILE]
+usage: aomenc-by-gop [--help] -i INPUT [--workers WORKERS] [--passes PASSES]
+                     [--kf-max-dist KF_MAX_DIST] [-u USE] [-s START] [-e END] [-y]
+                     [--priority PRIORITY] [--copy-timestamps] [--timestamps TIMESTAMPS]
+                     [--fps FPS] [--mux] [--keyframes KEYFRAMES] [--working-dir WORKING_DIR]
+                     [--keep] [--aomenc AOMENC] [--vspipe VSPIPE] [--mkvmerge MKVMERGE]
+                     [--mkvextract MKVEXTRACT] [--ranges RANGES] [--webm] [--darkboost]
+                     [--darkboost-file DARKBOOST_FILE]
                      output
 
 positional arguments:
@@ -57,7 +59,8 @@ optional arguments:
   --keyframes KEYFRAMES
                         Path to keyframes file
   --working-dir WORKING_DIR
-                        Path to working directory. Allows resuming and does not remove files after completion
+                        Path to working directory. Allows resuming and does not remove
+                        files after completion
   --keep                Do not delete temporary working directory.
   --aomenc AOMENC       Path to aomenc
   --vspipe VSPIPE       Path to vspipe
