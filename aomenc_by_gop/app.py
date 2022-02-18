@@ -57,6 +57,7 @@ class DefaultArgs:
     self.webm = False
     self.darkboost = False
     self.darkboost_file = None
+    self.darkboost_profile = "conservative"
     self.__dict__.update(kwargs)
 
 
@@ -660,10 +661,20 @@ v.resize.Point(width=w, height=h, format=vs.YUV420P8).set_output()"""
       if args.darkboost:
         level = darkboost.get_level((start_frame + end_frame) // 2)
 
-        if level < 32:
-          segment_args.append(("cq", -2))
-        elif level < 64:
-          segment_args.append(("cq", -1))
+        if args.darkboost_profile == "conservative":
+          if level < 32:
+            segment_args.append(("cq", -2))
+          elif level < 64:
+            segment_args.append(("cq", -1))
+        elif args.darkboost_profile == "medium":
+          if level < 32:
+            segment_args.append(("cq", -3))
+          elif level < 48:
+            segment_args.append(("cq", -2))
+          elif level < 64:
+            segment_args.append(("cq", -1))
+          elif level > 160:
+            segment_args.append(("cq", 1))
 
       queue.submit(start_frame, end_frame - 1, n[0], segment_args)
 
@@ -859,7 +870,7 @@ def main():
   parser.add_argument("-s", "--start", default=None, help="Input start frame")
   parser.add_argument("-e", "--end", default=None, help="Input end frame")
   parser.add_argument("-y",
-                      help="Skip warning / overwrite output",
+                      help="Skip warning / overwrite output.",
                       action="store_true")
   parser.add_argument("--priority", default=0, help="Process priority")
   parser.add_argument("--copy-timestamps",
@@ -874,7 +885,7 @@ def main():
   parser.add_argument("--mux",
                       default=False,
                       action="store_true",
-                      help="Mux with contents of input file")
+                      help="Mux with contents of input file.")
 
   parser.add_argument("--keyframes",
                       default=None,
@@ -882,7 +893,7 @@ def main():
   parser.add_argument("--working-dir",
                       default=None,
                       help="Path to working directory.\n" \
-                      "Allows resuming and does not remove files after completion")
+                      "Allows resuming and does not remove files after completion.")
   parser.add_argument("--keep",
                       default=False,
                       action="store_true",
@@ -895,7 +906,7 @@ def main():
                       help="Path to mkvmerge")
   parser.add_argument("--mkvextract",
                       default="mkvextract",
-                      help="Path to mkvmerge. Required for VFR")
+                      help="Path to mkvmerge. Required for VFR.")
   parser.add_argument("--ranges",
                       default=None,
                       help="frame_n:arguments;frame_n2:arguments")
@@ -906,6 +917,9 @@ def main():
   parser.add_argument("--darkboost-file",
                       default=None,
                       help="Path to darkboost cache")
+  parser.add_argument("--darkboost-profile",
+                      default="conservative",
+                      help="Available profiles: conservative, medium")
 
   args, aom_args = parser.parse_known_args()
 
