@@ -355,7 +355,7 @@ def concat(args, n_segments):
 
   out = _concat(args.mkvmerge, args._working_dir, segments, args.output)
 
-  if not args.copy_timestamps and not args.mux:
+  if not (args.copy_timestamps or args.timestamps or args.mux or args.fps):
     os.replace(out, args.output)
     return segments
 
