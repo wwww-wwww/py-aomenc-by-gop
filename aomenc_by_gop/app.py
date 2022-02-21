@@ -324,24 +324,33 @@ class DarkBoost:
     clip = clip.std.SplitPlanes()[0]
     clip = clip.resize.Bicubic(format=vs.GRAY8)
     clip = clip.std.Levels(min_in=16, max_in=235, min_out=0, max_out=255)
-    clip = clip.std.PlaneStats()
     self.clip = clip
 
-    def darkness(n, state, f):
-      state.state = f.props["PlaneStatsAverage"] * 255
-      return state.clip
+  def count(self, frame: int, threshold: int) -> List[float]:
+    key_frame = str(frame)
+    if key_frame not in self.cache:
+      self.cache[key_frame] = {}
 
-    self.clip_eval = clip.std.FrameEval(partial(darkness, state=self),
-                                        prop_src=clip)
+    key_threshold = str(threshold)
 
-  def get_level(self, frame: int) -> float:
-    key = str(frame)
-    if key not in self.cache:
-      self.clip_eval.get_frame(frame)
-      self.cache[key] = self.state
-      json.dump(self.cache, open(self.cachefile, "w+"), indent=2)
+    if key_threshold not in self.cache[key_frame]:
+      prop = self.clip.std.Expr(f"x {threshold} < 255 0 ?")
+      prop = prop.std.PlaneStats()
 
-    return self.cache[key]
+      def brightness(n, clip, state, f):
+        state["val"] = f.props["PlaneStatsAverage"]
+        return clip
+
+      state = {"val": None}
+      clip_eval = self.clip.std.FrameEval(partial(brightness,
+                                                  clip=self.clip,
+                                                  state=state),
+                                          prop_src=prop)
+      clip_eval.get_frame(frame)
+      self.cache[key_frame][key_threshold] = state["val"]
+
+    json.dump(self.cache, open(self.cachefile, "w+"), indent=2)
+    return self.cache[key_frame][key_threshold]
 
 
 def concat(args, n_segments):
@@ -575,7 +584,6 @@ def encode(args, aom_args, ranges):
     if args.timestamps:
       print("Can't have --fps and --timestamps")
       exit(1)
-    print("Output framerate:", args.fps)
 
   if args.timestamps and not os.path.isfile(args.timestamps):
     print("Timestamps file not found:", args.timestamps)
@@ -593,6 +601,15 @@ def encode(args, aom_args, ranges):
   print("vspipe:", args.vspipe)
   print("mkvmerge:", args.mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
+
+  extras = []
+  if args.fps:
+    extras.extend([f"Output framerate: {args.fps}"])
+
+  if args.darkboost:
+    extras.extend(["Darkboost", f"Profile: {args.darkboost_profile}"])
+
+  print(" | ".join(extras))
 
   print("Encoder arguments:", " ".join(aom_args))
 
@@ -659,21 +676,23 @@ v.resize.Point(width=w, height=h, format=vs.YUV420P8).set_output()"""
     else:
       segment_args = []
       if args.darkboost:
-        level = darkboost.get_level((start_frame + end_frame) // 2)
+        mid = (start_frame + end_frame) // 2
 
         if args.darkboost_profile == "conservative":
-          if level < 32:
+          if darkboost.count(mid, 32) > 0.25:
             segment_args.append(("cq", -2))
-          elif level < 64:
+          elif darkboost.count(mid, 64) > 0.25:
             segment_args.append(("cq", -1))
         elif args.darkboost_profile == "medium":
-          if level < 32:
+          if darkboost.count(mid, 32) > 0.25:
             segment_args.append(("cq", -3))
-          elif level < 48:
+          elif darkboost.count(mid, 48) > 0.25:
             segment_args.append(("cq", -2))
-          elif level < 64:
+          elif darkboost.count(mid, 64) > 0.25:
             segment_args.append(("cq", -1))
-          elif level > 160:
+          elif darkboost.count(mid, 224) < 0.33:
+            segment_args.append(("cq", 2))
+          elif darkboost.count(mid, 160) < 0.33:
             segment_args.append(("cq", 1))
 
       queue.submit(start_frame, end_frame - 1, n[0], segment_args)
