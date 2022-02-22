@@ -683,6 +683,13 @@ v.resize.Point(width=w, height=h, format=vs.YUV420P8).set_output()"""
             segment_args.append(("cq", -2))
           elif darkboost.count(mid, 64) > 0.25:
             segment_args.append(("cq", -1))
+        elif args.darkboost_profile == "light":
+          if darkboost.count(mid, 32) > 0.25:
+            segment_args.append(("cq", -2))
+          elif darkboost.count(mid, 64) > 0.25:
+            segment_args.append(("cq", -1))
+          elif darkboost.count(mid, 160) < 0.33:
+            segment_args.append(("cq", 1))
         elif args.darkboost_profile == "medium":
           if darkboost.count(mid, 32) > 0.25:
             segment_args.append(("cq", -3))
