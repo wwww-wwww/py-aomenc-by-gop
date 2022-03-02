@@ -10,6 +10,16 @@ re_keyframe = r"f *([0-9]+):([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
 re_mkvmerge_track = r"Track ID ([0-9]+?): video"
 
+script_input = """import vapoursynth as vs
+vs.core.{}(r\"{}\").set_output()"""
+
+script_gop = """import vapoursynth as vs
+v = vs.core.{}(r\"{}\")
+r = v.height / v.width
+w = min(1280, round(v.width / 1.5 / 2) * 2)
+h = min(round(r * 1280), round(v.height / 1.5 / 2) * 2)
+v.resize.Bicubic(width=w, height=h, format=vs.YUV420P8).set_output()"""
+
 if hasattr(subprocess, "CREATE_NO_WINDOW"):
   CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 else:
@@ -58,6 +68,7 @@ class DefaultArgs:
     self.darkboost = False
     self.darkboost_file = None
     self.darkboost_profile = "conservative"
+
     self.__dict__.update(kwargs)
 
 
@@ -622,27 +633,15 @@ def encode(args, aom_args, ranges):
 
   progress_bar = Progress(args.num_frames)
 
-  script = """import vapoursynth as vs
-vs.core.{}(r\"{}\").resize.Point(format=vs.YUV420P8).set_output()"""
-  script = script.format(args.use, args.input)
-
   script_name = os.path.join(args._working_dir, "video.vpy")
 
   with open(script_name, "w+") as script_f:
-    script_f.write(script)
-
-  script_gop = """import vapoursynth as vs
-v = vs.core.{}(r\"{}\")
-r = v.height / v.width
-w = min(1280, round(v.width / 1.5 / 2) * 2)
-h = min(round(r * 1280), round(v.height / 1.5 / 2) * 2)
-v.resize.Point(width=w, height=h, format=vs.YUV420P8).set_output()"""
-  script_gop = script_gop.format(args.use, args.input)
+    script_f.write(script_input.format(args.use, args.input))
 
   script_name_gop = os.path.join(args._working_dir, "gop.vpy")
 
   with open(script_name_gop, "w+") as script_f:
-    script_f.write(script_gop)
+    script_f.write(script_gop.format(args.use, args.input))
 
   if args.workers <= 0:
     print("Number of workers set to 0, only getting keyframes")
