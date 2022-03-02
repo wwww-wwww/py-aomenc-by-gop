@@ -349,7 +349,8 @@ class DarkBoost:
       clip_eval.get_frame(frame)
       self.cache[key_frame][key_threshold] = state["val"]
 
-    json.dump(self.cache, open(self.cachefile, "w+"), indent=2)
+      json.dump(self.cache, open(self.cachefile, "w+"), indent=2)
+
     return self.cache[key_frame][key_threshold]
 
 
