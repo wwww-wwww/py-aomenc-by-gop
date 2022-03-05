@@ -266,8 +266,6 @@ class Worker:
 
   def loop(self):
     while not self.stopped:
-      self.working.clear()
-
       try:
         self.segment = self.queue.acquire(self)
         if self.segment:
