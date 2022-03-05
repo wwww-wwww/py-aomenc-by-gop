@@ -365,6 +365,7 @@ class DarkBoost:
       elif self.count(frame, 160) < 0.33:
         extra_args.append(("cq", 1))
 
+
 def concat(args, n_segments):
   print("\nConcatenating")
   segments = [f"segment_{n + 1}.{args.segment_ext}" for n in range(n_segments)]
@@ -752,7 +753,7 @@ def encode(args, aom_args, ranges):
       completed = 0
       with open(args._keyframes, "r") as f:
         for line in f.readlines():
-          _kf, frame, start, _ft, _completed = parse_keyframe(
+          _, frame, start, _, _completed = parse_keyframe(
             line, frame, start, args.num_frames, offset, args.min_dist,
             args.kf_max_dist, add_job)
           completed += _completed
@@ -801,8 +802,10 @@ def encode(args, aom_args, ranges):
 
             output_log.append(line)
 
-            match, frame, start, frame_type = parse_keyframe(
-              line, frame, start)
+            match, frame, start, frame_type, _ = parse_keyframe(
+              line, frame, start, args.num_frames, offset, args.min_dist,
+              args.kf_max_dist, add_job)
+
             if match and (offset == 0 or frame - offset > 3):
               if args._keyframes:
                 gop_lines.append(f"f {frame}:{frame_type}\n")
