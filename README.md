@@ -28,12 +28,14 @@ Runs aomenc in parallel per group of pictures
 ```
 aomenc-by-gop --help
 usage: aomenc-by-gop [--help] -i INPUT [--workers WORKERS] [--passes PASSES]
-                     [--kf-max-dist KF_MAX_DIST] [-u USE] [-s START] [-e END] [-y]
-                     [--priority PRIORITY] [--copy-timestamps] [--timestamps TIMESTAMPS]
-                     [--fps FPS] [--mux] [--keyframes KEYFRAMES] [--working-dir WORKING_DIR]
-                     [--keep] [--aomenc AOMENC] [--vspipe VSPIPE] [--mkvmerge MKVMERGE]
-                     [--mkvextract MKVEXTRACT] [--ranges RANGES] [--webm] [--darkboost]
-                     [--darkboost-file DARKBOOST_FILE]
+                     [--kf-max-dist KF_MAX_DIST] [-u USE] [-s START] [-e END]
+                     [-y] [--copy-timestamps] [--timestamps TIMESTAMPS]
+                     [--fps FPS] [--mux] [--keyframes KEYFRAMES]
+                     [--working-dir WORKING_DIR] [--keep] [--aomenc AOMENC]
+                     [--vspipe VSPIPE] [--mkvmerge MKVMERGE]
+                     [--mkvextract MKVEXTRACT] [--ranges RANGES] [--webm]
+                     [--darkboost] [--darkboost-file DARKBOOST_FILE]
+                     [--darkboost-profile DARKBOOST_PROFILE] [--show-segments]
                      output
 
 positional arguments:
@@ -49,29 +51,33 @@ optional arguments:
   -s START, --start START
                         Input start frame
   -e END, --end END     Input end frame
-  -y                    Skip warning / overwrite output
-  --priority PRIORITY   Process priority
-  --copy-timestamps     Copy timestamps from input file. Support for variable frame rate
+  -y                    Skip warning / overwrite output.
+  --copy-timestamps     Copy timestamps from input file. Support for variable
+                        frame rate.
   --timestamps TIMESTAMPS
                         Timestamps file
-  --fps FPS             Output framerate (ex. 24000/1001)
-  --mux                 Mux with contents of input file
+  --fps FPS             Output framerate (ex. 24000/1001). Use "auto" to
+                        determine automatically.
+  --mux                 Mux with contents of input file.
   --keyframes KEYFRAMES
                         Path to keyframes file
   --working-dir WORKING_DIR
-                        Path to working directory. Allows resuming and does not remove
-                        files after completion
+                        Path to working directory. Allows resuming and does not
+                        remove files after completion.
   --keep                Do not delete temporary working directory.
   --aomenc AOMENC       Path to aomenc
   --vspipe VSPIPE       Path to vspipe
   --mkvmerge MKVMERGE   Path to mkvmerge
   --mkvextract MKVEXTRACT
-                        Path to mkvmerge. Required for VFR
+                        Path to mkvmerge. Required for VFR.
   --ranges RANGES       frame_n:arguments;frame_n2:arguments
   --webm
-  --darkboost
+  --darkboost           Enable dark boost.
   --darkboost-file DARKBOOST_FILE
                         Path to darkboost cache
+  --darkboost-profile DARKBOOST_PROFILE
+                        Available profiles: conservative, light, medium
+  --show-segments       Show individual segments' progress.
 ```
 
 Simple 2 pass encode:  
@@ -100,7 +106,7 @@ from aomenc_by_gop.app import encode, DefaultArgs
 
 args = {
   "workers": 4,
-  "fps": "24000/1001",
+  "fps": "auto",
   "darkboost": True,
   "input": "flt/01.mkv",
   "output": "enc/01.mkv",

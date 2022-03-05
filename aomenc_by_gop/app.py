@@ -6,7 +6,7 @@ from functools import partial
 from pkg_resources import resource_filename
 from rich.progress import Progress, BarColumn, ProgressColumn, Text, TimeElapsedColumn, TimeRemainingColumn
 from threading import Condition, Event, Lock, Thread
-from typing import List, Callable
+from typing import Callable, List, Optional
 
 re_keyframe = r"f *([0-9]+):([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
@@ -107,7 +107,7 @@ class Queue:
       while len(self.queue) > 0:
         self.empty.wait()
 
-  def submit(self, start, end, i, args):
+  def submit(self, start: int, end: int, i: int, args: List[str]) -> None:
     segment = Segment(start=self.offset_start + start,
                       end=self.offset_start + end,
                       n=i,
@@ -255,7 +255,7 @@ class Worker:
     shutil.move(segment_tmp, segment_output)
     return True
 
-  def _encode(self, segment: Segment):
+  def _encode(self, segment: Segment) -> bool:
     for _ in range(3):
       with self.state_lock:
         self.starting = True
@@ -444,7 +444,11 @@ def concat(args, n_segments):
   return segments
 
 
-def _concat(mkvmerge, cwd, files, output, flip=False):
+def _concat(mkvmerge: str,
+            cwd: str,
+            files: List[str],
+            output: str,
+            flip: bool = False) -> str:
   tmp_out = os.path.join(cwd, f"{output}.tmp{int(flip)}.mkv")
   cmd = [mkvmerge, "-o", tmp_out, files[0]]
 
@@ -494,7 +498,7 @@ def get_source_filter(core):
   raise Exception("No source filter found")
 
 
-def require_exec(file, default=None):
+def require_exec(file: str, default: Optional[str] = None) -> str:
   path = shutil.which(file)
   if not path:
     if default:
@@ -506,7 +510,7 @@ def require_exec(file, default=None):
   return path
 
 
-def parse_args(args):
+def parse_args(args) -> vs.VideoNode:
   args.segment_ext = "webm" if args.webm else "ivf"
   args.input = os.path.abspath(args.input)
   args.workers = int(args.workers)
@@ -612,9 +616,6 @@ def encode(args, aom_args, ranges):
   print(str(clip))
 
   if args.copy_timestamps:
-    if args.fps:
-      print("Can't have --fps and --copy-timestamps")
-      exit(1)
     if args.timestamps:
       print("Can't have --timestamps and --copy-timestamps")
       exit(1)
@@ -624,6 +625,9 @@ def encode(args, aom_args, ranges):
     if args.timestamps:
       print("Can't have --fps and --timestamps")
       exit(1)
+
+  if args.fps == "auto":
+    args.fps = str(clip.fps)
 
   if args.timestamps and not os.path.isfile(args.timestamps):
     print("Timestamps file not found:", args.timestamps)
@@ -923,16 +927,20 @@ def main():
   parser.add_argument("-y",
                       help="Skip warning / overwrite output.",
                       action="store_true")
-  parser.add_argument("--priority", default=0, help="Process priority")
+
+  if CREATE_NO_WINDOW:
+    parser.add_argument("--priority", default=0, help="Process priority")
+
   parser.add_argument("--copy-timestamps",
                       default=False,
                       action="store_true",
                       help="Copy timestamps from input file.\n" \
-                      "Support for variable frame rate")
+                      "Support for variable frame rate.")
   parser.add_argument("--timestamps", default=None, help="Timestamps file")
   parser.add_argument("--fps",
                       default=None,
-                      help="Output framerate (ex. 24000/1001)")
+                      help="Output framerate (ex. 24000/1001).\n" \
+                      "Use \"auto\" to determine automatically.")
   parser.add_argument("--mux",
                       default=False,
                       action="store_true",
@@ -964,15 +972,21 @@ def main():
 
   parser.add_argument("--webm", default=False, action="store_true")
 
-  parser.add_argument("--darkboost", default=False, action="store_true")
+  parser.add_argument("--darkboost",
+                      default=False,
+                      action="store_true",
+                      help="Enable dark boost.")
   parser.add_argument("--darkboost-file",
                       default=None,
                       help="Path to darkboost cache")
   parser.add_argument("--darkboost-profile",
                       default="conservative",
-                      help="Available profiles: conservative, medium")
+                      help="Available profiles: conservative, light, medium")
 
-  parser.add_argument("--show-segments", default=False, action="store_true")
+  parser.add_argument("--show-segments",
+                      default=False,
+                      action="store_true",
+                      help="Show individual segments' progress.")
 
   args, aom_args = parser.parse_known_args()
 
