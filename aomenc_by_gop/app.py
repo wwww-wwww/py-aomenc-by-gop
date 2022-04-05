@@ -153,7 +153,7 @@ class Worker:
     if self.args.show_segments:
       task = self.progress.add_task(
         f"{segment.n:4d} {segment.start:5d}-{segment.end:<5d}",
-        total=segment.end - segment.start)
+        total=segment.end - segment.start + 1)
 
     vspipe_cmd = [
       self.args.vspipe, self.script, "-c", "y4m", "-", "-s",
@@ -660,8 +660,10 @@ def encode(args, aom_args, ranges):
   if "--enable-keyframe-filtering=0" not in aom_args:
     print("WARNING: --enable-keyframe-filtering=0 is not set")
 
-  if args.priority and CREATE_NO_WINDOW:
+  if CREATE_NO_WINDOW and args.priority:
     args.priority = priorities[str(args.priority)]
+  else:
+    args.priority = 0
 
   script_name = os.path.join(args._working_dir, "video.vpy")
 
