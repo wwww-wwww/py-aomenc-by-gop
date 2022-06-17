@@ -42,7 +42,7 @@ priorities = {
   "2": 0x00000080,
 }
 
-Segment = namedtuple("Segment", ["start", "end", "n", "args"])
+Segment = namedtuple("Segment", ["start", "end", "n", "args", "info"])
 
 
 class DefaultArgs:
@@ -107,11 +107,13 @@ class Queue:
       while len(self.queue) > 0:
         self.empty.wait()
 
-  def submit(self, start: int, end: int, i: int, args: List[str]) -> None:
+  def submit(self, start: int, end: int, i: int, args: List[str],
+             extra_args: List[str]) -> None:
     segment = Segment(start=self.offset_start + start,
                       end=self.offset_start + end,
                       n=i,
-                      args=args)
+                      args=args,
+                      info=" ".join([f"{a}:{b}" for a, b in extra_args]))
     with self.lock:
       self.queue.append(segment)
       self.queue.sort(key=lambda x: x[0] - x[1])
@@ -152,7 +154,7 @@ class Worker:
   def encode(self, segment: Segment):
     if self.args.show_segments:
       task = self.progress.add_task(
-        f"{segment.n:4d} {segment.start:5d}-{segment.end:<5d}",
+        f"{segment.n:4d} {segment.start:5d}-{segment.end:<5d} {segment.info}",
         total=segment.end - segment.start + 1)
 
     vspipe_cmd = [
@@ -207,7 +209,8 @@ class Worker:
             task,
             completed=0,
             description=
-            f"{segment.n:4d} {segment.start:5d}-{segment.end:<5d} {p + 1}")
+            f"{segment.n:4d} {segment.start:5d}-{segment.end:<5d} {segment.info} {p + 1}"
+          )
 
         while True:
           line = self.pipe.stdout.readline().strip()
@@ -338,29 +341,31 @@ class DarkBoost:
 
     return self.cache[key_frame][key_threshold]
 
-  def get(self, frame: int, extra_args: List, profile: str) -> None:
+  def get(self, frames: List[int], extra_args: List, profile: str) -> None:
+    frames = list(set(frames))
+
     if profile == "conservative":
-      if self.count(frame, 32) > 0.25:
+      if any(self.count(frame, 32) > 0.25 for frame in frames):
         extra_args.append(("cq", -2))
-      elif self.count(frame, 64) > 0.25:
+      elif any(self.count(frame, 64) > 0.25 for frame in frames):
         extra_args.append(("cq", -1))
     elif profile == "light":
-      if self.count(frame, 32) > 0.25:
+      if any(self.count(frame, 32) > 0.25 for frame in frames):
         extra_args.append(("cq", -2))
-      elif self.count(frame, 64) > 0.25:
+      elif any(self.count(frame, 64) > 0.25 for frame in frames):
         extra_args.append(("cq", -1))
-      elif self.count(frame, 160) < 0.33:
+      elif all(self.count(frame, 160) < 0.33 for frame in frames):
         extra_args.append(("cq", 1))
     elif profile == "medium":
-      if self.count(frame, 32) > 0.25:
+      if any(self.count(frame, 32) > 0.25 for frame in frames):
         extra_args.append(("cq", -3))
-      elif self.count(frame, 48) > 0.25:
+      elif any(self.count(frame, 48) > 0.25 for frame in frames):
         extra_args.append(("cq", -2))
-      elif self.count(frame, 64) > 0.25:
+      elif any(self.count(frame, 64) > 0.25 for frame in frames):
         extra_args.append(("cq", -1))
-      elif self.count(frame, 224) < 0.33:
+      elif all(self.count(frame, 224) < 0.33 for frame in frames):
         extra_args.append(("cq", 2))
-      elif self.count(frame, 160) < 0.33:
+      elif all(self.count(frame, 160) < 0.33 for frame in frames):
         extra_args.append(("cq", 1))
 
 
@@ -728,8 +733,13 @@ def encode(args, aom_args, ranges):
 
         extra_args = []
         if args.darkboost:
-          mid = (start_frame + end_frame) // 2
-          darkboost.get(mid, extra_args, args.darkboost_profile)
+          segment_length = end_frame - start_frame
+          db_frames = [
+            int(start_frame + segment_length * .25),
+            int(start_frame + segment_length * .5),
+            int(start_frame + segment_length * .75),
+          ]
+          darkboost.get(db_frames, extra_args, args.darkboost_profile)
 
         # apply ranges and extra args
         seg_ranges = [r for r in ranges if r[0] <= start_frame + args.start]
@@ -749,7 +759,7 @@ def encode(args, aom_args, ranges):
           segment_args = replace_args(segment_args, seg_ranges[-1][1])
 
         queue.submit(start_frame, end_frame - 1, segment_count[0],
-                     segment_args)
+                     segment_args, extra_args)
 
       return 0
 
