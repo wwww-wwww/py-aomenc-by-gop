@@ -17,9 +17,9 @@ vs.core.{}(r\"{}\").set_output()"""
 
 script_gop = """import vapoursynth as vs
 v = vs.core.{}(r\"{}\")
-r = v.height / v.width
-w = min(1280, round(v.width / 1.5 / 2) * 2)
-h = min(round(r * 1280), round(v.height / 1.5 / 2) * 2)
+r = v.width / v.height
+h = min(720, (v.height / 1.5) // 2 * 2)
+w = min(round(r * 720), (v.width / 1.5) // 2 * 2)
 v.resize.Bicubic(width=w, height=h, format=vs.YUV420P8).set_output()"""
 
 if hasattr(subprocess, "CREATE_NO_WINDOW"):
