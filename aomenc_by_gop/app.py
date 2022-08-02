@@ -13,7 +13,9 @@ re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
 re_mkvmerge_track = r"Track ID ([0-9]+?): video"
 
 script_input = """import vapoursynth as vs
-vs.core.{}(r\"{}\").set_output()"""
+clip = vs.core.{}(r\"{}\")
+{}
+clip.set_output()"""
 
 script_gop = """import vapoursynth as vs
 v = vs.core.{}(r\"{}\")
@@ -46,6 +48,7 @@ Segment = namedtuple("Segment", ["start", "end", "n", "args", "info"])
 
 
 class DefaultArgs:
+
   def __init__(self, **kwargs):
     self.input = None
     self.output = None
@@ -73,12 +76,15 @@ class DefaultArgs:
     self.darkboost_file = None
     self.darkboost_profile = "conservative"
 
+    self.extra_filter = None
+
     self.show_segments = False
 
     self.__dict__.update(kwargs)
 
 
 class Queue:
+
   def __init__(self, offset_start):
     self.queue = []
     self.lock = Lock()
@@ -86,7 +92,7 @@ class Queue:
     self.update = None
     self.offset_start = offset_start or 0
 
-  def acquire(self, worker):
+  def acquire(self, worker) -> Optional[Segment]:
     with self.lock:
       if len(self.queue) == 0:
         self.empty.wait()
@@ -132,6 +138,7 @@ def replace_args(args1: List[str], args2: List[str]) -> List[str]:
 
 
 class Worker:
+
   def __init__(self, args, queue, passes, script, update, progress):
     self.args = args
     self.queue = queue
@@ -294,6 +301,7 @@ class Worker:
 
 
 class FPSColumn(ProgressColumn):
+
   def render(self, task: "Task") -> Text:
     speed = task.finished_speed or task.speed
     if speed is None:
@@ -302,6 +310,7 @@ class FPSColumn(ProgressColumn):
 
 
 class DarkBoost:
+
   def __init__(self, clip: vs.VideoNode, cachefile: str):
     self.state = None
     self.cache = {}
@@ -673,7 +682,8 @@ def encode(args, aom_args, ranges):
   script_name = os.path.join(args._working_dir, "video.vpy")
 
   with open(script_name, "w+") as script_f:
-    script_f.write(script_input.format(args.use, args.input))
+    script_f.write(
+      script_input.format(args.use, args.input, args.extra_filter or ""))
 
   script_name_gop = os.path.join(args._working_dir, "gop.vpy")
 
@@ -999,6 +1009,11 @@ def main():
                       default=False,
                       action="store_true",
                       help="Show individual segments' progress.")
+
+  parser.add_argument("--extra-filter",
+                      default=None,
+                      help="Extra vapoursynth filtering (ex. cropping).\n" \
+                      "Input and output is clip.")
 
   args, aom_args = parser.parse_known_args()
 

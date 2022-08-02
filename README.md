@@ -36,6 +36,7 @@ usage: aomenc-by-gop [--help] -i INPUT [--workers WORKERS] [--passes PASSES]
                      [--mkvextract MKVEXTRACT] [--ranges RANGES] [--webm]
                      [--darkboost] [--darkboost-file DARKBOOST_FILE]
                      [--darkboost-profile DARKBOOST_PROFILE] [--show-segments]
+                     [--extra-filter EXTRA_FILTER]
                      output
 
 positional arguments:
@@ -78,6 +79,9 @@ optional arguments:
   --darkboost-profile DARKBOOST_PROFILE
                         Available profiles: conservative, light, medium
   --show-segments       Show individual segments' progress.
+  --extra-filter EXTRA_FILTER
+                        Extra vapoursynth filtering (ex. cropping). Input and
+                        output is clip.
 ```
 
 Simple 2 pass encode:  
@@ -98,6 +102,13 @@ Enable resuming using a different onepass keyframes file
 
 Use vpxenc:  
 `aomenc-by-gop -i input out.mkv --aomenc vpxenc`
+
+Example cropping:  
+`aomenc-by-gop -i input out.mkv --extra-filter="clip = clip.std.Crop(top=140, bottom=140)"`
+
+## Extra Filter
+
+Available variables are `vs` for vapoursynth and `clip` for the clip.
 
 ## Example Python Usage
 
