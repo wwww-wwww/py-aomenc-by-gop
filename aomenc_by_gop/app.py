@@ -76,6 +76,14 @@ class DefaultArgs:
     self.darkboost_file = None
     self.darkboost_profile = "conservative"
 
+    # bruteforce only
+    self.use_metric = None
+    self.metric_tmin = 86
+    self.metric_tmax = 84
+    self.metric_minq = 0
+    self.metric_maxq = 20
+    self.metric_denoise = 1
+
     self.extra_filter = None
 
     self.show_segments = False
@@ -115,11 +123,13 @@ class Queue:
 
   def submit(self, start: int, end: int, i: int, args: List[str],
              extra_args: List[str]) -> None:
+    segment_info = " ".join([f"{a}:{b}" for a, b in extra_args])
+    segment_info = segment_info + " " if segment_info else ""
     segment = Segment(start=self.offset_start + start,
                       end=self.offset_start + end,
                       n=i,
                       args=args,
-                      info=" ".join([f"{a}:{b}" for a, b in extra_args]))
+                      info=segment_info)
     with self.lock:
       self.queue.append(segment)
       self.queue.sort(key=lambda x: x[0] - x[1])
@@ -135,6 +145,91 @@ def replace_args(args1: List[str], args2: List[str]) -> List[str]:
   ]
   new_args += args2
   return new_args
+
+
+def get_cq(args):
+  for arg in args:
+    if arg.startswith("--cq-level="):
+      return int(arg.split("=")[1])
+  return None
+
+
+def replace_cq(args, cq):
+  new_args = [arg for arg in args if not arg.startswith("--cq-level=")]
+  new_args.append(f"--cq-level={cq}")
+  return new_args
+
+
+def score_worse(metric, score, target):
+  if metric == "butteraugli":
+    return score > target
+
+  return score < target
+
+
+def score_worst(args, a, b):
+  if a is None: return b
+
+  if args.use_metric == "butteraugli":
+    return max(a, b)
+
+  return min(a, b)
+
+
+def get_len(args, path):
+  try:
+    return len(args.source_filter(path, cache=0))
+  except:
+    return 0
+
+
+class Tester:
+
+  def __init__(self, args, clip):
+    self.source_filter = args.source_filter
+    self.metric = args.use_metric.lower()
+    self.denoise = args.metric_denoise
+
+    self.clip = clip
+
+    if self.denoise:
+      self.clip = self.clip.dfttest.DFTTest(sigma=self.denoise)
+
+    self.clip = self.clip.resize.Bicubic(format=vs.RGB24, matrix_in_s="709")
+    self.clip = self.clip.fpng.Write(filename="orig.png", overwrite=1)
+    self.lock = Lock()
+
+  def get(self, path, frame1, frame2):
+    with self.lock:
+      distorted = self.source_filter(path)
+      if self.denoise:
+        distorted = distorted.dfttest.DFTTest(sigma=1)
+      distorted = distorted.resize.Bicubic(format=vs.RGB24, matrix_in_s="709")
+      distorted = distorted.fpng.Write(filename="dist.png", overwrite=1)
+
+      self.clip.get_frame(frame1)
+      distorted.get_frame(frame2)
+      t = subprocess.run([self.metric, "orig.png", "dist.png"],
+                         capture_output=True)
+
+      return float(t.stdout.decode("utf-8"))
+
+
+class Stats:
+
+  def __init__(self, filename):
+    self.filename = filename
+    self.lock = Lock()
+    self.stats = {}
+    if os.path.exists(self.filename):
+      with open(self.filename, "r") as f:
+        self.stats = json.load(f)
+
+  def update(self, key, value):
+    with self.lock:
+      self.stats[str(key)] = value
+      with open(self.filename, "w+") as f:
+        json.dump(self.stats, f, indent=2, sort_keys=True)
 
 
 class Worker:
@@ -156,11 +251,27 @@ class Worker:
     self.state_lock = Lock()
     self.state_ev = Condition(self.state_lock)
     self.starting = False
+
+    self.current_cq = -1
+    self.last_cq = None
+    self.last_file = None
+
+    self.task = None
+
+    self.pass1 = False
+
     Thread(target=self.loop, daemon=True).start()
+
+  def update_description(self, items, reset=False):
+    if reset:
+      self.progress.update(self.task, completed=0)
+
+    self.progress.update(self.task,
+                         description=" ".join(list(filter(None, items))))
 
   def encode(self, segment: Segment):
     if self.args.show_segments:
-      task = self.progress.add_task(
+      self.task = self.progress.add_task(
         f"{segment.n:4d} {segment.start:5d}-{segment.end:<5d} {segment.info}",
         total=segment.end - segment.start + 1)
 
@@ -173,6 +284,10 @@ class Worker:
     segment_tmp = tempfile.mktemp(dir=self.args._working_dir,
                                   suffix=f".{self.args.segment_ext}")
 
+    segment_args = segment.args
+    if self.args.use_metric:
+      segment_args = replace_cq(segment_args, self.current_cq)
+
     aomenc_cmd = [
       self.args.aomenc,
       "-",
@@ -180,9 +295,11 @@ class Worker:
       "-o",
       segment_tmp,
       f"--passes={self.passes}",
-    ] + segment.args
+    ] + segment_args
 
     for p in range(self.passes):
+      if p == 0 and self.pass1: continue
+
       pass_cmd = aomenc_cmd + [f"--pass={p + 1}"]
       if self.passes == 2:
         segment_fpf = os.path.join(self.args._working_dir,
@@ -207,17 +324,28 @@ class Worker:
                                      stderr=subprocess.STDOUT,
                                      universal_newlines=True,
                                      creationflags=self.args.priority)
+
         with self.state_lock:
           self.starting = False
           self.state_ev.notify_all()
 
         if self.args.show_segments:
-          self.progress.update(
-            task,
-            completed=0,
-            description=
-            f"{segment.n:4d} {segment.start:5d}-{segment.end:<5d} {segment.info} {p + 1}"
-          )
+          self.update_description([
+            f"{segment.n:4d}",
+            f"{segment.start:5d}-{segment.end:<5d}",
+            segment.info,
+            str(self.current_cq),
+            str(p + 1),
+          ], True)
+
+        min_score = None
+        segment_length = segment.end - segment.start
+        test_frames = [
+          int(segment_length * .25),
+          int(segment_length * .5),
+          int(segment_length * .75),
+        ]
+        redo = False
 
         while True:
           line = self.pipe.stdout.readline().strip()
@@ -234,17 +362,57 @@ class Worker:
             new_frame = int(match.group(2))
             if new_frame > frame:
               if self.args.show_segments:
-                self.progress.update(task, advance=new_frame - frame)
+                self.progress.update(self.task, advance=new_frame - frame)
 
               if current_pass == self.passes:
                 self.update(new_frame - frame)
 
               frame = new_frame
 
+              while p == 1 and test_frames and frame - test_frames[0] > 1:
+                if get_len(self.args, segment_tmp) - test_frames[0] <= 1: break
+
+                score = self.args.tester.get(segment_tmp,
+                                             test_frames[0] + segment.start,
+                                             test_frames[0])
+                test_frames.pop(0)
+
+                new_min_score = score_worst(self.args, min_score, score)
+                if new_min_score == min_score: continue
+                min_score = new_min_score
+
+                self.update_description([
+                  f"{segment.n:4d}",
+                  f"{segment.start:5d}-{segment.end:<5d}",
+                  segment.info,
+                  str(self.current_cq),
+                  f"{min_score:.2f}",
+                  str(p + 1),
+                ])
+
+                if self.current_cq < self.args.metric_maxq and not score_worse(
+                    self.args.use_metric, min_score, self.args.metric_tmax):
+                  if self.last_file:
+                    os.remove(self.last_file)
+                  self.last_cq = self.current_cq
+                  self.last_file = segment_tmp
+                  redo = True
+                  return 3
+
+                if self.current_cq > self.args.metric_minq and score_worse(
+                    self.args.use_metric, min_score, self.args.metric_tmin):
+                  os.remove(segment_tmp)
+                  if self.last_file:  # regression
+                    segment_tmp = self.last_file
+                    self.current_cq = self.last_cq
+                  else:
+                    redo = True
+                    return 2
+
       except:
         print(traceback.format_exc())
       finally:
-        if self.pipe.returncode != 0:
+        if not redo and self.pipe.returncode != 0:
           if self.stopped: return False
           self.update(-frame)
           if s_output:
@@ -257,19 +425,81 @@ class Worker:
         self.pipe = None
         self.vspipe = None
 
-    if self.args.show_segments:
-      self.progress.remove_task(task)
+      if p == 0:
+        self.pass1 = True
+
+    while test_frames:
+      score = self.args.tester.get(segment_tmp, test_frames[0] + segment.start,
+                                   test_frames[0])
+      min_score = score_worst(self.args, min_score, score)
+      test_frames.pop(0)
+
+    if self.args.use_metric:
+      if self.current_cq < self.args.metric_maxq and not score_worse(
+          self.args.use_metric, min_score, self.args.metric_tmax):
+        if self.last_file:
+          os.remove(self.last_file)
+        self.last_cq = self.current_cq
+        self.last_file = segment_tmp
+        return 3
+
+      if self.current_cq > self.args.metric_minq and score_worse(
+          self.args.use_metric, min_score, self.args.metric_tmin):
+        os.remove(segment_tmp)
+        if self.last_file:  # regression
+          segment_tmp = self.last_file
+          self.current_cq = self.last_cq
+        else:
+          self.update(-(segment.end - segment.start))
+          return 2
 
     segment_output = os.path.join(
       self.args._working_dir, f"segment_{segment.n}.{self.args.segment_ext}")
     shutil.move(segment_tmp, segment_output)
+
+    if self.last_file and self.last_file != segment_tmp:
+      os.remove(self.last_file)
+
+    if self.args.use_metric:
+      return [score]
+
     return True
 
   def _encode(self, segment: Segment) -> bool:
-    for _ in range(3):
+    if self.args.use_metric:
+      self.current_cq = get_cq(segment.args)
+      self.last_cq = None
+      self.last_file = None
+
+    self.pass1 = False
+    tries = 3
+
+    while True:
+      if tries == 0:
+        break
+
       with self.state_lock:
         self.starting = True
-      if self.encode(segment): return True
+
+      resp = self.encode(segment)
+
+      if self.task:
+        self.progress.remove_task(self.task)
+        self.task = None
+
+      if not resp:
+        tries -= 1
+        self.pass1 = False
+      elif resp == 2:
+        self.current_cq -= 1
+      elif resp == 3:
+        self.last_cq = self.current_cq
+        self.current_cq += 1
+      else:
+        if self.args.use_metric:
+          self.args.stats.update(segment.n, (self.current_cq, resp[0]))
+        return True
+
       if self.stopped: return True
 
     return False
@@ -535,9 +765,9 @@ def parse_args(args) -> vs.VideoNode:
   core = vs.core
 
   if args.use:
-    source_filter = get_attr(core, args.use, True)
+    args.source_filter = get_attr(core, args.use, True)
   else:
-    args.use, source_filter = get_source_filter(core)
+    args.use, args.source_filter = get_source_filter(core)
     print(f"Using {args.use} as source filter")
 
   if os.path.exists(args.output) and not args.y:
@@ -551,7 +781,7 @@ def parse_args(args) -> vs.VideoNode:
       print("Not overwriting, exiting.")
       exit(0)
 
-  video = source_filter(args.input)
+  video = args.source_filter(args.input)
 
   num_frames = video.num_frames
 
@@ -647,7 +877,13 @@ def encode(args, aom_args, ranges):
     print("Timestamps file not found:", args.timestamps)
     exit(1)
 
+  extras = [f"Workers: {args.workers}", f"Passes: {args.passes}"]
+
+  if args.fps:
+    extras.append(f"Output framerate: {args.fps}")
+
   if args.darkboost:
+    extras.append(f"Darkboost: {args.darkboost_profile}")
     if args.darkboost_file:
       darkboost_path = args.darkboost_file
     else:
@@ -655,20 +891,20 @@ def encode(args, aom_args, ranges):
       darkboost_path = os.path.join(os.path.dirname(args.input), filename)
     darkboost = DarkBoost(clip, darkboost_path)
 
+  if args.use_metric:
+    extras.append(" ".join([
+      args.use_metric,
+      f"{args.metric_tmin}<{args.metric_tmax}",
+      f"{args.metric_minq}<{get_cq(aom_args)}<{args.metric_maxq}",
+    ]))
+    args.tester = Tester(args, clip)
+    args.stats = Stats(os.path.join(args._working_dir, "stats.json"))
+
   print("aomenc:", args.aomenc)
   print("vspipe:", args.vspipe)
   print("mkvmerge:", args.mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
-
-  extras = [f"Workers: {args.workers}", f"Passes: {args.passes}"]
-  if args.fps:
-    extras.extend([f"Output framerate: {args.fps}"])
-
-  if args.darkboost:
-    extras.extend(["Darkboost", f"Profile: {args.darkboost_profile}"])
-
   print(" | ".join(extras))
-
   print("Encoder arguments:", " ".join(aom_args))
 
   if "--enable-keyframe-filtering=0" not in aom_args:
@@ -1014,6 +1250,13 @@ def main():
                       default=None,
                       help="Extra vapoursynth filtering (ex. cropping).\n" \
                       "Input and output is clip.")
+
+  parser.add_argument("--use-metric", default=None)
+  parser.add_argument("--metric-tmax", default=86)
+  parser.add_argument("--metric-tmin", default=85)
+  parser.add_argument("--metric-minq", default=0)
+  parser.add_argument("--metric-maxq", default=20)
+  parser.add_argument("--metric-denoise", default=1)
 
   args, aom_args = parser.parse_known_args()
 
