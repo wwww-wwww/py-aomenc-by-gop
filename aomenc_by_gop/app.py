@@ -180,13 +180,6 @@ def score_worst(args, a, b):
   return min(a, b)
 
 
-def get_len(args, path):
-  try:
-    return len(args.source_filter(path, cache=0))
-  except:
-    return 0
-
-
 class Tester:
 
   def __init__(self, args, clip):
@@ -204,8 +197,13 @@ class Tester:
     self.lock = Lock()
 
   def get(self, path, frame1, frame2):
-    with self.lock:
+    try:
       distorted = self.source_filter(path, cache=0)
+    except:
+      return None
+    if len(distorted) < 3: return None
+    if len(distorted) <= frame2: return None
+    with self.lock:
       if self.denoise:
         distorted = distorted.dfttest.DFTTest(sigma=1)
       distorted = distorted.resize.Bicubic(format=vs.RGB24, matrix_in_s="709")
@@ -345,22 +343,30 @@ class Worker:
           self.starting = False
           self.state_ev.notify_all()
 
+        segment_length = segment.end - segment.start
+
+        test_frames = [
+          0,
+          int(segment_length * .1),
+          int(segment_length * .3),
+          int(segment_length * .5),
+          int(segment_length * .7),
+          int(segment_length * .9),
+        ]
+        test_frames = sorted(list(set(test_frames)))
+        min_score = None
+
         if self.args.show_segments:
           self.update_description([
-            f"{segment.n:4d}",
-            f"{segment.start:5d}-{segment.end:<5d}",
+            f"{segment.n:4d}", f"{segment.start:5d}-{segment.end:<5d}",
             segment.info,
+            str(p + 1),
             str(self.current_cq),
             f"{self.last_score:.2f}" if self.last_score else "",
-            str(p + 1),
+            str(test_frames[0]) if test_frames else "",
+            "f" if self.freeze else ""
           ], True)
 
-        segment_length = segment.end - segment.start
-        test_frames = [
-          int(segment_length * .25),
-          int(segment_length * .5),
-          int(segment_length * .75),
-        ]
         redo = False
 
         while True:
@@ -387,51 +393,44 @@ class Worker:
 
               while not self.freeze and p == 1 and test_frames and frame - test_frames[
                   0] > 1:
-                if get_len(self.args, segment_tmp) - test_frames[0] <= 1: break
-
                 score = self.args.tester.get(segment_tmp,
                                              test_frames[0] + segment.start,
                                              test_frames[0])
                 if score is None: break
                 test_frames.pop(0)
 
-                new_min_score = score_worst(self.args, self.last_score, score)
-                if new_min_score == self.last_score: continue
-                self.last_score = new_min_score
+                new_min_score = score_worst(self.args, min_score, score)
+                if new_min_score == min_score: continue
+                min_score = new_min_score
 
                 self.update_description([
                   f"{segment.n:4d}",
                   f"{segment.start:5d}-{segment.end:<5d}",
                   segment.info,
+                  str(p + 1),
                   str(self.current_cq),
                   f"{self.last_score:.2f}" if self.last_score else "",
-                  str(p + 1),
+                  f"{min_score:.2f}" if min_score else "",
+                  str(test_frames[0]) if test_frames else "",
+                  "f" if self.freeze else "",
                 ])
 
-                if self.current_cq < self.args.metric_maxq and not score_worse(
-                    self.args.use_metric, self.last_score,
-                    self.args.metric_tmax):
-                  redo = True
-
-                  if self.change == -1:
+                if self.current_cq > self.args.metric_minq and score_worse(
+                    self.args.use_metric, min_score,
+                    self.args.metric_tmin):  # score is bad
+                  if self.change == 1:  # regression
+                    self.current_cq = self.last_cq
+                    min_score = self.last_score
+                    segment_tmp = self.last_file
                     self.freeze = True
                     break
 
-                  self.last_cq = self.current_cq
-                  return 3
-
-                if self.current_cq > self.args.metric_minq and score_worse(
-                    self.args.use_metric, self.last_score,
-                    self.args.metric_tmin):
                   redo = True
-
-                  if self.change == 1:  # regression
-                    self.current_cq = self.last_cq
-                    return 4
-
                   self.last_cq = self.current_cq
+                  self.last_score = min_score
                   return 2
 
+          if self.freeze: break
       except:
         print(traceback.format_exc())
       finally:
@@ -440,7 +439,7 @@ class Worker:
           if self.stopped: return False
           if redo:
             os.remove(segment_tmp)
-          else:
+          elif not self.freeze:
             if s_output:
               print(" ".join(vspipe_cmd), "|", " ".join(pass_cmd))
               print("\n" + "\n".join(s_output))
@@ -454,30 +453,34 @@ class Worker:
       if p == 0:
         self.pass1 = True
 
-    while test_frames:
-      score = self.args.tester.get(segment_tmp, test_frames[0] + segment.start,
-                                   test_frames[0])
-      self.last_score = score_worst(self.args, self.last_score, score)
-      test_frames.pop(0)
+    if self.args.use_metric and not self.freeze:
+      while test_frames:
+        score = self.args.tester.get(segment_tmp,
+                                     test_frames[0] + segment.start,
+                                     test_frames[0])
+        min_score = score_worst(self.args, min_score, score)
+        test_frames.pop(0)
 
-    if self.args.use_metric:
-      if self.change >= 0 and self.current_cq < self.args.metric_maxq and not score_worse(
-          self.args.use_metric, self.last_score, self.args.metric_tmax):
+      if self.current_cq > self.args.metric_minq and score_worse(
+          self.args.use_metric, min_score, self.args.metric_tmin):
+        os.remove(segment_tmp)
+        if self.last_file:  # regression
+          self.current_cq = self.last_cq
+          min_score = self.last_score
+          segment_tmp = self.last_file
+        else:
+          self.update(-(segment.end - segment.start))
+          return 2
+
+      elif self.change >= 0 and self.current_cq < self.args.metric_maxq and not score_worse(
+          self.args.use_metric, min_score, self.args.metric_tmax):
         if self.last_file:
           os.remove(self.last_file)
         self.last_cq = self.current_cq
         self.last_file = segment_tmp
+        self.last_score = min_score
+        self.update(-(segment.end - segment.start))
         return 3
-
-      if self.current_cq > self.args.metric_minq and score_worse(
-          self.args.use_metric, self.last_score, self.args.metric_tmin):
-        os.remove(segment_tmp)
-        if self.last_file:  # regression
-          segment_tmp = self.last_file
-          self.current_cq = self.last_cq
-        else:
-          self.update(-(segment.end - segment.start))
-          return 2
 
     segment_output = os.path.join(
       self.args._working_dir, f"segment_{segment.n}.{self.args.segment_ext}")
@@ -487,7 +490,7 @@ class Worker:
       os.remove(self.last_file)
 
     if self.args.use_metric:
-      return [score]
+      return [min_score]
 
     return True
 
@@ -526,9 +529,6 @@ class Worker:
         self.last_cq = self.current_cq
         self.current_cq += 1
         self.change = 1
-      elif resp == 4:
-        self.freeze = True
-        continue
       else:
         if self.args.use_metric:
           self.args.stats.update(segment.n, (self.current_cq, resp[0]))
