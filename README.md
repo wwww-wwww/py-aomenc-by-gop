@@ -10,6 +10,8 @@ Runs aomenc in parallel per group of pictures
 - [Usage within Python for automation](#example-python-usage)
 - Minimal amount of dependencies
 - Dark boost
+- Target metric
+- Zones
 
 ## Requirements
 
@@ -138,9 +140,9 @@ aom_args = [
 ]
 
 ranges = [
-  (5000, ["--denoise-noise-level=1"]),  # low noise
-  (6000, ["--denoise-noise-level=10"]),
-  (7000, ["--cq-level=10"], True),  # ignore dark boost
+  (5000, ["--denoise-noise-level=1"], {}),  # low noise
+  (6000, ["--denoise-noise-level=10"], {}),
+  (7000, ["--cq-level=10"], {"darkboost": False}),
 ]
 
 encode(DefaultArgs(**args), aom_args, ranges)

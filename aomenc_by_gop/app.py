@@ -7,6 +7,7 @@ from pkg_resources import resource_filename
 from rich.progress import Progress, BarColumn, ProgressColumn, Text, TimeElapsedColumn, TimeRemainingColumn
 from threading import Condition, Event, Lock, Thread
 from typing import Callable, List, Optional
+from types import SimpleNamespace
 
 re_keyframe = r"f *([0-9]+):([0|1])"
 re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
@@ -44,7 +45,9 @@ priorities = {
   "2": 0x00000080,
 }
 
-Segment = namedtuple("Segment", ["start", "end", "n", "args", "info"])
+Segment = namedtuple("Segment", ["start", "end", "n", "enc_args", "args"])
+
+gs = SimpleNamespace()
 
 
 class DefaultArgs:
@@ -78,10 +81,11 @@ class DefaultArgs:
 
     # bruteforce only
     self.use_metric = None
+    self.use_metric_path = None
     self.metric_tmin = 86
     self.metric_tmax = 84
-    self.metric_minq = 0
-    self.metric_maxq = 20
+    self.metric_qmin = 0
+    self.metric_qmax = 20
     self.metric_denoise = 1
 
     self.extra_filter = None
@@ -121,15 +125,13 @@ class Queue:
       while len(self.queue) > 0:
         self.empty.wait()
 
-  def submit(self, start: int, end: int, i: int, args: List[str],
-             extra_args: List[str]) -> None:
-    segment_info = " ".join([f"{a}:{b}" for a, b in extra_args])
-    segment_info = segment_info + " " if segment_info else ""
+  def submit(self, start: int, end: int, i: int, enc_args: List[str],
+             args: dict) -> None:
     segment = Segment(start=self.offset_start + start,
                       end=self.offset_start + end,
                       n=i,
-                      args=args,
-                      info=segment_info)
+                      enc_args=enc_args,
+                      args=args)
     with self.lock:
       self.queue.append(segment)
       self.queue.sort(key=lambda x: x[0] - x[1])
@@ -184,7 +186,7 @@ class Tester:
 
   def __init__(self, args, clip):
     self.source_filter = args.source_filter
-    self.metric = args.use_metric.lower()
+    self.metric_path = args.use_metric_path
     self.denoise = args.metric_denoise
 
     self.clip = clip
@@ -214,7 +216,7 @@ class Tester:
         distorted.get_frame(frame2)
       except:
         return None
-      t = subprocess.run([self.metric, "orig.png", "dist.png"],
+      t = subprocess.run([self.metric_path, "orig.png", "dist.png"],
                          capture_output=True)
 
       return float(t.stdout.decode("utf-8"))
@@ -270,24 +272,47 @@ class Worker:
 
     Thread(target=self.loop, daemon=True).start()
 
-  def update_description(self, items, reset=False):
-    if reset:
-      self.progress.update(self.task, completed=0)
+  def update_description(self,
+                         segment,
+                         items,
+                         min_score=0,
+                         test_frames=[],
+                         **kwargs):
 
-    self.progress.update(self.task, description=list_e(items))
+    items = [
+      f"{segment.n:4d}",
+      f"{segment.start:5d}-{segment.end:<5d}",
+    ] + items
+
+    if segment.args.use_metric:
+      items.extend([
+        f"{segment.args.metric_qmin}<{segment.args.metric_qmax}",
+        f"{segment.args.metric_tmin}<{segment.args.metric_tmax}",
+        f"{self.last_score:.2f}" if self.last_score else "-",
+        f"{min_score:.2f}" if min_score else "-",
+        str(test_frames[0]) if test_frames else "-",
+        "f" if self.freeze else "",
+      ])
+
+    self.progress.update(self.task, description=list_e(items), **kwargs)
 
   def encode(self, segment: Segment):
+    enc_args = segment.enc_args
+    if segment.args.use_metric:
+      enc_args = replace_cq(enc_args, self.current_cq)
+
+    current_cq = get_cq(enc_args)
+
     if self.args.show_segments:
       self.task = self.progress.add_task(
         list_e([
           f"{segment.n:4d}",
           f"{segment.start:5d}-{segment.end:<5d}",
-          segment.info,
-          str(self.current_cq),
-          f"{self.last_score:.2f}" if self.last_score else "",
+          str(current_cq),
         ]),
         total=segment.end - segment.start + 1,
       )
+      self.update_description(segment, [str(current_cq)])
 
     vspipe_cmd = [
       self.args.vspipe, self.script, "-c", "y4m", "-", "-s",
@@ -298,18 +323,10 @@ class Worker:
     segment_tmp = tempfile.mktemp(dir=self.args._working_dir,
                                   suffix=f".{self.args.segment_ext}")
 
-    segment_args = segment.args
-    if self.args.use_metric:
-      segment_args = replace_cq(segment_args, self.current_cq)
-
     aomenc_cmd = [
-      self.args.aomenc,
-      "-",
-      f"--{self.args.segment_ext}",
-      "-o",
-      segment_tmp,
-      f"--passes={self.passes}",
-    ] + segment_args
+      self.args.aomenc, "-", f"--{self.args.segment_ext}", "-o", segment_tmp,
+      f"--passes={self.passes}"
+    ] + enc_args
 
     for p in range(self.passes):
       if p == 0 and self.pass1: continue
@@ -357,15 +374,11 @@ class Worker:
         min_score = None
 
         if self.args.show_segments:
-          self.update_description([
-            f"{segment.n:4d}", f"{segment.start:5d}-{segment.end:<5d}",
-            segment.info,
-            str(p + 1),
-            str(self.current_cq),
-            f"{self.last_score:.2f}" if self.last_score else "",
-            str(test_frames[0]) if test_frames else "",
-            "f" if self.freeze else ""
-          ], True)
+          self.update_description(segment,
+                                  [str(p + 1), str(current_cq)],
+                                  min_score,
+                                  test_frames,
+                                  completed=0)
 
         redo = False
 
@@ -393,31 +406,23 @@ class Worker:
 
               while not self.freeze and p == 1 and test_frames and frame - test_frames[
                   0] > 1:
-                score = self.args.tester.get(segment_tmp,
-                                             test_frames[0] + segment.start,
-                                             test_frames[0])
+                score = gs.tester.get(segment_tmp,
+                                      test_frames[0] + segment.start,
+                                      test_frames[0])
                 if score is None: break
                 test_frames.pop(0)
 
-                new_min_score = score_worst(self.args, min_score, score)
+                new_min_score = score_worst(segment.args, min_score, score)
                 if new_min_score == min_score: continue
                 min_score = new_min_score
 
-                self.update_description([
-                  f"{segment.n:4d}",
-                  f"{segment.start:5d}-{segment.end:<5d}",
-                  segment.info,
-                  str(p + 1),
-                  str(self.current_cq),
-                  f"{self.last_score:.2f}" if self.last_score else "",
-                  f"{min_score:.2f}" if min_score else "",
-                  str(test_frames[0]) if test_frames else "",
-                  "f" if self.freeze else "",
-                ])
+                self.update_description(
+                  segment, [str(p + 1), str(current_cq)], min_score,
+                  test_frames)
 
-                if self.current_cq > self.args.metric_minq and score_worse(
-                    self.args.use_metric, min_score,
-                    self.args.metric_tmin):  # score is bad
+                if self.current_cq > segment.args.metric_qmin and score_worse(
+                    segment.args.use_metric, min_score,
+                    segment.args.metric_tmin):  # score is bad
                   if self.change == 1:  # regression
                     self.current_cq = self.last_cq
                     min_score = self.last_score
@@ -453,16 +458,15 @@ class Worker:
       if p == 0:
         self.pass1 = True
 
-    if self.args.use_metric and not self.freeze:
+    if segment.args.use_metric and not self.freeze:
       while test_frames:
-        score = self.args.tester.get(segment_tmp,
-                                     test_frames[0] + segment.start,
-                                     test_frames[0])
-        min_score = score_worst(self.args, min_score, score)
+        score = gs.tester.get(segment_tmp, test_frames[0] + segment.start,
+                              test_frames[0])
+        min_score = score_worst(segment.args, min_score, score)
         test_frames.pop(0)
 
-      if self.current_cq > self.args.metric_minq and score_worse(
-          self.args.use_metric, min_score, self.args.metric_tmin):
+      if self.current_cq > segment.args.metric_qmin and score_worse(
+          segment.args.use_metric, min_score, segment.args.metric_tmin):
         os.remove(segment_tmp)
         if self.last_file:  # regression
           self.current_cq = self.last_cq
@@ -472,8 +476,8 @@ class Worker:
           self.update(-(segment.end - segment.start))
           return 2
 
-      elif self.change >= 0 and self.current_cq < self.args.metric_maxq and not score_worse(
-          self.args.use_metric, min_score, self.args.metric_tmax):
+      elif self.change >= 0 and self.current_cq < segment.args.metric_qmax and not score_worse(
+          segment.args.use_metric, min_score, segment.args.metric_tmax):
         if self.last_file:
           os.remove(self.last_file)
         self.last_cq = self.current_cq
@@ -489,14 +493,14 @@ class Worker:
     if self.last_file and self.last_file != segment_tmp:
       os.remove(self.last_file)
 
-    if self.args.use_metric:
+    if segment.args.use_metric:
       return [min_score]
 
     return True
 
   def _encode(self, segment: Segment) -> bool:
-    if self.args.use_metric:
-      self.current_cq = get_cq(segment.args)
+    if segment.args.use_metric:
+      self.current_cq = get_cq(segment.enc_args)
       self.last_cq = None
       self.last_file = None
       self.change = 0
@@ -530,8 +534,8 @@ class Worker:
         self.current_cq += 1
         self.change = 1
       else:
-        if self.args.use_metric:
-          self.args.stats.update(segment.n, (self.current_cq, resp[0]))
+        if segment.args.use_metric:
+          gs.stats.update(segment.n, (self.current_cq, resp[0]))
         return True
 
       if self.stopped: return True
@@ -890,6 +894,10 @@ def encode(args, aom_args, ranges):
                                    (resource_filename,
                                     ("aomenc_by_gop", onepass_keyframes)))
 
+  if args.use_metric:
+    args.use_metric_path = require_exec(args.use_metric_path
+                                        or args.use_metric)
+
   clip = parse_args(args)
   print(str(clip))
 
@@ -925,19 +933,24 @@ def encode(args, aom_args, ranges):
       darkboost_path = os.path.join(os.path.dirname(args.input), filename)
     darkboost = DarkBoost(clip, darkboost_path)
 
-  if args.use_metric:
-    extras.append(" ".join([
-      args.use_metric,
-      f"{args.metric_tmin}<{args.metric_tmax}",
-      f"{args.metric_minq}<{get_cq(aom_args)}<{args.metric_maxq}",
-    ]))
-    args.tester = Tester(args, clip)
-    args.stats = Stats(os.path.join(args._working_dir, "stats.json"))
-
   print("aomenc:", args.aomenc)
   print("vspipe:", args.vspipe)
   print("mkvmerge:", args.mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
+
+  if args.use_metric:
+    args.use_metric = args.use_metric.lower()
+
+    extras.append(" ".join([
+      args.use_metric,
+      f"{args.metric_tmin}<{args.metric_tmax}",
+      f"{args.metric_qmin}<{get_cq(aom_args)}<{args.metric_qmax}",
+    ]))
+    gs.tester = Tester(args, clip)
+    gs.stats = Stats(os.path.join(args._working_dir, "stats.json"))
+
+    print(f"{args.use_metric}:", args.use_metric_path)
+
   print(" | ".join(extras))
   print("Encoder arguments:", " ".join(aom_args))
 
@@ -1009,10 +1022,18 @@ def encode(args, aom_args, ranges):
       if os.path.isfile(segment_output):
         return end_frame - start_frame
       else:
-        segment_args = aom_args.copy()
+        segment_args = DefaultArgs(**args.__dict__)
+        segment_enc_args = aom_args.copy()
+
+        # apply ranges and extra args
+        seg_ranges = [r for r in ranges if r[0] <= start_frame + args.start]
+
+        if seg_ranges:
+          segment_enc_args = replace_args(segment_enc_args, seg_ranges[-1][1])
+          segment_args.__dict__.update(**seg_ranges[-1][2])
 
         extra_args = []
-        if args.darkboost:
+        if segment_args.darkboost:
           segment_length = end_frame - start_frame
           db_frames = [
             int(start_frame + segment_length * .25),
@@ -1021,25 +1042,15 @@ def encode(args, aom_args, ranges):
           ]
           darkboost.get(db_frames, extra_args, args.darkboost_profile)
 
-        # apply ranges and extra args
-        seg_ranges = [r for r in ranges if r[0] <= start_frame + args.start]
-        if seg_ranges:
-          segment_args = replace_args(segment_args, seg_ranges[-1][1])
-
         for extra_arg in extra_args:
           if extra_arg[0] == "cq":
-            cq_arg = [arg.split("=") for arg in segment_args]
-            cq_arg = [arg for arg in cq_arg if arg[0] == "--cq-level"]
+            current_cq = get_cq(segment_enc_args)
             if cq_arg:
-              new_cq = int(cq_arg[0][1]) + extra_arg[1]
-              segment_args = replace_args(segment_args,
-                                          [f"--cq-level={new_cq}"])
-
-        if seg_ranges and len(seg_ranges[-1]) > 2 and seg_ranges[-1][2]:
-          segment_args = replace_args(segment_args, seg_ranges[-1][1])
+              new_cq = current_cq + extra_arg[1]
+              segment_enc_args = replace_cq(segment_enc_args, new_cq)
 
         queue.submit(start_frame, end_frame - 1, segment_count[0],
-                     segment_args, extra_args)
+                     segment_enc_args, segment_args)
 
       return 0
 
@@ -1288,8 +1299,8 @@ def main():
   parser.add_argument("--use-metric", default=None)
   parser.add_argument("--metric-tmax", default=86)
   parser.add_argument("--metric-tmin", default=85)
-  parser.add_argument("--metric-minq", default=0)
-  parser.add_argument("--metric-maxq", default=20)
+  parser.add_argument("--metric-qmin", default=0)
+  parser.add_argument("--metric-qmax", default=20)
   parser.add_argument("--metric-denoise", default=1)
 
   args, aom_args = parser.parse_known_args()
