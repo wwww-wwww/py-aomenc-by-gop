@@ -535,7 +535,7 @@ class Worker:
         self.change = 1
       else:
         if segment.args.use_metric:
-          gs.stats.update(segment.n, (self.current_cq, resp[0]))
+          gs.stats.update(segment.n, (segment.start, self.current_cq, resp[0]))
         return True
 
       if self.stopped: return True
