@@ -362,15 +362,19 @@ class Worker:
 
         segment_length = segment.end - segment.start
 
-        test_frames = [
-          0,
-          int(segment_length * .1),
-          int(segment_length * .3),
-          int(segment_length * .5),
-          int(segment_length * .7),
-          int(segment_length * .9),
-        ]
-        test_frames = sorted(list(set(test_frames)))
+        test_frames = None
+
+        if self.args.use_metric:
+          test_frames = [
+            0,
+            int(segment_length * .1),
+            int(segment_length * .3),
+            int(segment_length * .5),
+            int(segment_length * .7),
+            int(segment_length * .9),
+          ]
+          test_frames = sorted(list(set(test_frames)))
+
         min_score = None
 
         if self.args.show_segments:
@@ -439,6 +443,9 @@ class Worker:
       except:
         print(traceback.format_exc())
       finally:
+        self.pipe.kill()
+        self.vspipe.kill()
+
         if self.pipe.returncode != 0:
           self.update(-frame)
           if self.stopped: return False
@@ -450,8 +457,6 @@ class Worker:
               print("\n" + "\n".join(s_output))
             return False
 
-        self.pipe.kill()
-        self.vspipe.kill()
         self.pipe = None
         self.vspipe = None
 
