@@ -39,10 +39,10 @@ else:
   cmd_limit = 30000
 
 priorities = {
-  "-2": 0x00000040,
-  "-1": 0x00004000,
-  "1": 0x00008000,
-  "2": 0x00000080,
+    "-2": 0x00000040,
+    "-1": 0x00004000,
+    "1": 0x00008000,
+    "2": 0x00000080,
 }
 
 Segment = namedtuple("Segment", ["start", "end", "n", "enc_args", "args"])
@@ -81,7 +81,7 @@ class DefaultArgs:
 
     # bruteforce only
     self.use_metric = None
-    self.use_metric_path = None
+    #self.use_metric_path = None
     self.metric_tmin = 86
     self.metric_tmax = 84
     self.metric_qmin = 0
@@ -143,7 +143,8 @@ class Queue:
 def replace_args(args1: List[str], args2: List[str]) -> List[str]:
   args2_s = [arg.split("=")[0] for arg in args2]
   new_args = [
-    arg for arg in args1 if not any(arg.startswith(arg2) for arg2 in args2_s)
+      arg for arg in args1
+      if not any(arg.startswith(arg2) for arg2 in args2_s)
   ]
   new_args += args2
   return new_args
@@ -186,40 +187,55 @@ class Tester:
 
   def __init__(self, args, clip):
     self.source_filter = args.source_filter
-    self.metric_path = args.use_metric_path
-    self.denoise = args.metric_denoise
+    self.metric = args.use_metric
+    #self.metric_path = args.use_metric_path
+    self.denoise_sigma = args.metric_denoise
 
     self.clip = clip
 
-    if self.denoise:
-      self.clip = self.clip.dfttest.DFTTest(sigma=self.denoise)
-
-    self.clip = self.clip.resize.Bicubic(format=vs.RGB24, matrix_in_s="709")
-    self.clip = self.clip.fpng.Write(filename="orig.png", overwrite=1)
     self.lock = Lock()
 
+  def denoise(self, clip):
+    if self.denoise_sigma:
+      clip = clip.dfttest.DFTTest(sigma=self.denoise_sigma)
+    #clip = clip.resize.Bicubic(format=vs.RGB24, matrix_in_s="709")
+    return clip
+
   def get(self, path, frame1, frame2):
+    if os.stat(path).st_size == 0: return None
     try:
       distorted = self.source_filter(path, cache=0)
     except:
+      print(traceback.format_exc())
       return None
     if len(distorted) < 3: return None
     if len(distorted) <= frame2: return None
+
     with self.lock:
-      if self.denoise:
-        distorted = distorted.dfttest.DFTTest(sigma=1)
-      distorted = distorted.resize.Bicubic(format=vs.RGB24, matrix_in_s="709")
-      distorted = distorted.fpng.Write(filename="dist.png", overwrite=1)
-
-      self.clip.get_frame(frame1)
+      ref = self.denoise(self.clip)[frame1:]
       try:
-        distorted.get_frame(frame2)
+        distorted = self.denoise(distorted)[frame2:]
       except:
+        print(traceback.format_exc())
         return None
-      t = subprocess.run([self.metric_path, "orig.png", "dist.png"],
-                         capture_output=True)
 
-      return float(t.stdout.decode("utf-8"))
+      try:
+        if self.metric == "ssimulacra2":
+          ref = ref.resize.Bicubic(format=vs.RGBS,
+                                   transfer_in_s="709",
+                                   transfer_s="linear",
+                                   matrix_in_s="709")
+          distorted = distorted.resize.Bicubic(format=vs.RGBS,
+                                               transfer_in_s="709",
+                                               transfer_s="linear",
+                                               matrix_in_s="709")
+          clip = ref.ssimulacra2.SSIMULACRA2(distorted)
+          return clip.get_frame(0).props["_SSIMULACRA2"]
+        else:
+          return None
+      except:
+        import traceback
+        print(traceback.format_exc())
 
 
 class Stats:
@@ -280,18 +296,18 @@ class Worker:
                          **kwargs):
 
     items = [
-      f"{segment.n:4d}",
-      f"{segment.start:5d}-{segment.end:<5d}",
+        f"{segment.n:4d}",
+        f"{segment.start:5d}-{segment.end:<5d}",
     ] + items
 
     if segment.args.use_metric:
       items.extend([
-        f"{segment.args.metric_qmin}<{segment.args.metric_qmax}",
-        f"{segment.args.metric_tmin}<{segment.args.metric_tmax}",
-        f"{self.last_score:.2f}" if self.last_score else "-",
-        f"{min_score:.2f}" if min_score else "-",
-        str(test_frames[0]) if test_frames else "-",
-        "f" if self.freeze else "",
+          f"{segment.args.metric_qmin}<{segment.args.metric_qmax}",
+          f"{segment.args.metric_tmin}<{segment.args.metric_tmax}",
+          f"{self.last_score:.2f}" if self.last_score else "-",
+          f"{min_score:.2f}" if min_score else "-",
+          str(test_frames[0]) if test_frames else "-",
+          "f" if self.freeze else "",
       ])
 
     self.progress.update(self.task, description=list_e(items), **kwargs)
@@ -305,27 +321,27 @@ class Worker:
 
     if self.args.show_segments:
       self.task = self.progress.add_task(
-        list_e([
-          f"{segment.n:4d}",
-          f"{segment.start:5d}-{segment.end:<5d}",
-          str(current_cq),
-        ]),
-        total=segment.end - segment.start + 1,
+          list_e([
+              f"{segment.n:4d}",
+              f"{segment.start:5d}-{segment.end:<5d}",
+              str(current_cq),
+          ]),
+          total=segment.end - segment.start + 1,
       )
       self.update_description(segment, [str(current_cq)])
 
     vspipe_cmd = [
-      self.args.vspipe, self.script, "-c", "y4m", "-", "-s",
-      str(segment.start), "-e",
-      str(segment.end)
+        self.args.vspipe, self.script, "-c", "y4m", "-", "-s",
+        str(segment.start), "-e",
+        str(segment.end)
     ]
 
     segment_tmp = tempfile.mktemp(dir=self.args._working_dir,
                                   suffix=f".{self.args.segment_ext}")
 
     aomenc_cmd = [
-      self.args.aomenc, "-", f"--{self.args.segment_ext}", "-o", segment_tmp,
-      f"--passes={self.passes}"
+        self.args.aomenc, "-", f"--{self.args.segment_ext}", "-o", segment_tmp,
+        f"--passes={self.passes}"
     ] + enc_args
 
     for p in range(self.passes):
@@ -338,7 +354,7 @@ class Worker:
         pass_cmd.append(f"--fpf={segment_fpf}")
         if p == 0:
           pass_cmd = [
-            a for a in pass_cmd if not a.startswith("--denoise-noise-level")
+              a for a in pass_cmd if not a.startswith("--denoise-noise-level")
           ]
 
       frame = 0
@@ -366,12 +382,12 @@ class Worker:
 
         if self.args.use_metric:
           test_frames = [
-            0,
-            int(segment_length * .1),
-            int(segment_length * .3),
-            int(segment_length * .5),
-            int(segment_length * .7),
-            int(segment_length * .9),
+              0,
+              int(segment_length * .1),
+              int(segment_length * .3),
+              int(segment_length * .5),
+              int(segment_length * .7),
+              int(segment_length * .9),
           ]
           test_frames = sorted(list(set(test_frames)))
 
@@ -413,16 +429,18 @@ class Worker:
                 score = gs.tester.get(segment_tmp,
                                       test_frames[0] + segment.start,
                                       test_frames[0])
-                if score is None: break
+                if score is None:
+                  break
                 test_frames.pop(0)
 
                 new_min_score = score_worst(segment.args, min_score, score)
-                if new_min_score == min_score: continue
-                min_score = new_min_score
 
                 self.update_description(
-                  segment, [str(p + 1), str(current_cq)], min_score,
-                  test_frames)
+                    segment, [str(p + 1), str(current_cq)], new_min_score,
+                    test_frames)
+
+                if new_min_score == min_score: continue
+                min_score = new_min_score
 
                 if self.current_cq > segment.args.metric_qmin and score_worse(
                     segment.args.use_metric, min_score,
@@ -492,7 +510,7 @@ class Worker:
         return 3
 
     segment_output = os.path.join(
-      self.args._working_dir, f"segment_{segment.n}.{self.args.segment_ext}")
+        self.args._working_dir, f"segment_{segment.n}.{self.args.segment_ext}")
     shutil.move(segment_tmp, segment_output)
 
     if self.last_file and self.last_file != segment_tmp:
@@ -688,10 +706,10 @@ def concat(args, n_segments):
     path_timestamps = os.path.join(args._working_dir, "timestamps.txt")
 
     extract = [
-      args.mkvextract,
-      args.input,
-      "timestamps_v2",
-      f"{trackid}:{path_timestamps}",
+        args.mkvextract,
+        args.input,
+        "timestamps_v2",
+        f"{trackid}:{path_timestamps}",
     ]
 
     assert subprocess.run(extract).returncode == 0
@@ -716,8 +734,8 @@ def concat(args, n_segments):
 
   if args.fps:
     merge += [
-      "--default-duration", f"0:{args.fps}fps",
-      "--fix-bitstream-timing-information", "0"
+        "--default-duration", f"0:{args.fps}fps",
+        "--fix-bitstream-timing-information", "0"
     ]
 
   merge += [out]
@@ -899,10 +917,6 @@ def encode(args, aom_args, ranges):
                                    (resource_filename,
                                     ("aomenc_by_gop", onepass_keyframes)))
 
-  if args.use_metric:
-    args.use_metric_path = require_exec(args.use_metric_path
-                                        or args.use_metric)
-
   clip = parse_args(args)
   print(str(clip))
 
@@ -946,15 +960,19 @@ def encode(args, aom_args, ranges):
   if args.use_metric:
     args.use_metric = args.use_metric.lower()
 
+    if args.use_metric != "ssimulacra2":
+      print("Metric", args.use_metric, "not supported")
+      exit(1)
+
     extras.append(" ".join([
-      args.use_metric,
-      f"{args.metric_tmin}<{args.metric_tmax}",
-      f"{args.metric_qmin}<{get_cq(aom_args)}<{args.metric_qmax}",
+        args.use_metric,
+        f"{args.metric_tmin}<{args.metric_tmax}",
+        f"{args.metric_qmin}<{get_cq(aom_args)}<{args.metric_qmax}",
     ]))
     gs.tester = Tester(args, clip)
     gs.stats = Stats(os.path.join(args._working_dir, "stats.json"))
 
-    print(f"{args.use_metric}:", args.use_metric_path)
+    print(f"{args.use_metric}:", args.use_metric)
 
   print(" | ".join(extras))
   print("Encoder arguments:", " ".join(aom_args))
@@ -971,7 +989,7 @@ def encode(args, aom_args, ranges):
 
   with open(script_name, "w+") as script_f:
     script_f.write(
-      script_input.format(args.use, args.input, args.extra_filter or ""))
+        script_input.format(args.use, args.input, args.extra_filter or ""))
 
   script_name_gop = os.path.join(args._working_dir, "gop.vpy")
 
@@ -1023,7 +1041,7 @@ def encode(args, aom_args, ranges):
     def add_job(start_frame: int, end_frame: int):
       segment_count[0] += 1
       segment_output = os.path.join(
-        args._working_dir, f"segment_{segment_count[0]}.{args.segment_ext}")
+          args._working_dir, f"segment_{segment_count[0]}.{args.segment_ext}")
       if os.path.isfile(segment_output):
         return end_frame - start_frame
       else:
@@ -1041,9 +1059,9 @@ def encode(args, aom_args, ranges):
         if segment_args.darkboost:
           segment_length = end_frame - start_frame
           db_frames = [
-            int(start_frame + segment_length * .25),
-            int(start_frame + segment_length * .5),
-            int(start_frame + segment_length * .75),
+              int(start_frame + segment_length * .25),
+              int(start_frame + segment_length * .5),
+              int(start_frame + segment_length * .75),
           ]
           darkboost.get(db_frames, extra_args, args.darkboost_profile)
 
@@ -1064,8 +1082,8 @@ def encode(args, aom_args, ranges):
       with open(args._keyframes, "r") as f:
         for line in f.readlines():
           _, frame, start, _, _completed = parse_keyframe(
-            line, frame, start, args.num_frames, offset, args.min_dist,
-            args.kf_max_dist, add_job)
+              line, frame, start, args.num_frames, offset, args.min_dist,
+              args.kf_max_dist, add_job)
           completed += _completed
 
       progress.update(task_encode, completed=completed)
@@ -1073,7 +1091,7 @@ def encode(args, aom_args, ranges):
 
     for worker_id in range(args.workers):
       workers.append(
-        Worker(args, queue, args.passes, script_name, update, progress))
+          Worker(args, queue, args.passes, script_name, update, progress))
 
     if frame < args.num_frames - 1:
       offset = max(0, frame - 3)
@@ -1113,8 +1131,8 @@ def encode(args, aom_args, ranges):
             output_log.append(line)
 
             match, frame, start, frame_type, _ = parse_keyframe(
-              line, frame, start, args.num_frames, offset, args.min_dist,
-              args.kf_max_dist, add_job)
+                line, frame, start, args.num_frames, offset, args.min_dist,
+                args.kf_max_dist, add_job)
 
             if match and (offset == 0 or frame - offset > 3):
               if args._keyframes:
@@ -1128,8 +1146,8 @@ def encode(args, aom_args, ranges):
           if pipe.returncode == 0:
             if frame < args.num_frames - 1:
               gop_lines.extend([
-                f"f {frame + i + 1}:0\n"
-                for i in range(args.num_frames - frame - 1)
+                  f"f {frame + i + 1}:0\n"
+                  for i in range(args.num_frames - frame - 1)
               ])
             keyframes_file.writelines(gop_lines)
             keyframes_file.flush()
@@ -1193,11 +1211,11 @@ def encode(args, aom_args, ranges):
     print("Cleaning up")
     # remove temporary files
     tmp_files = [
-      os.path.join(args._working_dir, f"{args.output}.tmp0.mkv"),
-      os.path.join(args._working_dir, f"{args.output}.tmp1.mkv"),
-      os.path.join(args._working_dir, "gop.vpy"),
-      os.path.join(args._working_dir, "video.vpy"),
-      os.path.join(args._working_dir, "timestamps.txt"),
+        os.path.join(args._working_dir, f"{args.output}.tmp0.mkv"),
+        os.path.join(args._working_dir, f"{args.output}.tmp1.mkv"),
+        os.path.join(args._working_dir, "gop.vpy"),
+        os.path.join(args._working_dir, "video.vpy"),
+        os.path.join(args._working_dir, "timestamps.txt"),
     ]
 
     for file in tmp_files:
