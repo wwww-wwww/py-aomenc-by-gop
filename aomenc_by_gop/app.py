@@ -193,8 +193,6 @@ class Tester:
 
     self.clip = clip
 
-    self.sizes = {}
-
     self.lock = Lock()
 
   def denoise(self, clip):
@@ -205,10 +203,6 @@ class Tester:
   def get(self, path, frame1, frame2):
     size = os.stat(path).st_size
     if size == 0: return None
-
-    if path in self.sizes and size == self.sizes[path]: return None
-
-    self.sizes[path] = size
 
     try:
       distorted = self.source_filter(path, cache=0)
