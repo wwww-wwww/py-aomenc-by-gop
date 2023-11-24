@@ -193,21 +193,28 @@ class Tester:
 
     self.clip = clip
 
+    self.sizes = {}
+
     self.lock = Lock()
 
   def denoise(self, clip):
     if self.denoise_sigma:
       clip = clip.dfttest.DFTTest(sigma=self.denoise_sigma)
-    #clip = clip.resize.Bicubic(format=vs.RGB24, matrix_in_s="709")
     return clip
 
   def get(self, path, frame1, frame2):
-    if os.stat(path).st_size == 0: return None
+    size = os.stat(path).st_size
+    if size == 0: return None
+
+    if path in self.sizes and size == self.sizes[path]: return None
+
+    self.sizes[path] = size
+
     try:
       distorted = self.source_filter(path, cache=0)
     except:
-      print(traceback.format_exc())
       return None
+
     if len(distorted) < 3: return None
     if len(distorted) <= frame2: return None
 
@@ -215,11 +222,7 @@ class Tester:
       ref = self.denoise(self.clip)[frame1:]
       try:
         distorted = self.denoise(distorted)[frame2:]
-      except:
-        print(traceback.format_exc())
-        return None
 
-      try:
         if self.metric == "ssimulacra2":
           ref = ref.resize.Bicubic(format=vs.RGBS,
                                    transfer_in_s="709",
@@ -231,11 +234,8 @@ class Tester:
                                                matrix_in_s="709")
           clip = ref.ssimulacra2.SSIMULACRA2(distorted)
           return clip.get_frame(0).props["_SSIMULACRA2"]
-        else:
-          return None
       except:
-        import traceback
-        print(traceback.format_exc())
+        return None
 
 
 class Stats:
