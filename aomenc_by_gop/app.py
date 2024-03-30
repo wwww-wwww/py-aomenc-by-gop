@@ -1244,7 +1244,7 @@ def main():
   parser = argparse.ArgumentParser(add_help=False)
   parser.add_argument("--help", action="help")
 
-  parser.add_argument("-i", "--input", required=True)
+  parser.add_argument("-i", "--input")
   parser.add_argument("output")
   parser.add_argument("--workers", default=4)
   parser.add_argument("--passes", default=2)
@@ -1330,7 +1330,18 @@ def main():
   parser.add_argument("--metric-qmax", default=20)
   parser.add_argument("--metric-denoise", default=1)
 
+  parser.add_argument("--graph", default=None)
+
   args, aom_args = parser.parse_known_args()
+
+  if args.graph:
+    from . import graph
+    return graph.graph(args.graph)
+
+  if not args.input:
+    print(sys.argv[0] + ":",
+          "error: the following arguments are required: -i/--input")
+    exit(1)
 
   ranges = []
   if args.ranges:
