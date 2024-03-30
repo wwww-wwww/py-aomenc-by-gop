@@ -14,12 +14,12 @@ re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
 re_mkvmerge_track = r"Track ID ([0-9]+?): video"
 
 script_input = """import vapoursynth as vs
-clip = vs.core.{}(r\"{}\")
+clip = vs.core.{}(r\"{}\", cachefile=r\"{}\")
 {}
 clip.set_output()"""
 
 script_gop = """import vapoursynth as vs
-v = vs.core.{}(r\"{}\")
+v = vs.core.{}(r\"{}\", cachefile=r\"{}\")
 r = v.width / v.height
 h = min(720, (v.height / 1.5) // 2 * 2)
 w = min(round(r * 720), (v.width / 1.5) // 2 * 2)
@@ -59,6 +59,7 @@ class DefaultArgs:
     self.passes = 2
     self.kf_max_dist = 240
     self.use = "lsmas.LWLibavSource"
+    self.source_filter_cachefile = ""
     self.start = None
     self.end = None
     self.y = False
@@ -836,7 +837,14 @@ def parse_args(args) -> vs.VideoNode:
       print("Not overwriting, exiting.")
       exit(0)
 
-  video = args.source_filter(args.input)
+  args.source_filter_cachefile = os.path.join(
+      os.getcwd(),
+      args.input.replace("/", "_") + ".lwi")
+
+  print(f"Cachefile: {args.source_filter_cachefile}")
+
+  video = args.source_filter(args.input,
+                             cachefile=args.source_filter_cachefile)
 
   num_frames = video.num_frames
 
@@ -983,12 +991,14 @@ def encode(args, aom_args, ranges):
 
   with open(script_name, "w+") as script_f:
     script_f.write(
-        script_input.format(args.use, args.input, args.extra_filter or ""))
+        script_input.format(args.use, args.input, args.source_filter_cachefile,
+                            args.extra_filter or ""))
 
   script_name_gop = os.path.join(args._working_dir, "gop.vpy")
 
   with open(script_name_gop, "w+") as script_f:
-    script_f.write(script_gop.format(args.use, args.input))
+    script_f.write(
+        script_gop.format(args.use, args.input, args.source_filter_cachefile))
 
   if args.workers <= 0:
     print("Number of workers set to 0, only getting keyframes")
