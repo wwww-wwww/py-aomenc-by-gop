@@ -10,7 +10,7 @@ from typing import Callable, List, Optional
 from types import SimpleNamespace
 
 re_keyframe = r"f *([0-9]+):([0|1])"
-re_aom_frame = r"Pass *([0-9]+)/[0-9]+ *frame * [0-9]+/([0-9]+)"
+re_aom_frame = r"Pass *[0-9]+/[0-9]+ *frame * [0-9]+/([0-9]+)"
 re_mkvmerge_track = r"Track ID ([0-9]+?): video"
 
 script_input = """import vapoursynth as vs
@@ -71,7 +71,6 @@ class DefaultArgs:
     self.keyframes = None
     self.working_dir = None
     self.keep = False
-    self.aomenc = "aomenc"
     self.vspipe = "vspipe"
     self.mkvmerge = "mkvmerge"
     self.mkvextract = "mkvextract"
@@ -85,6 +84,7 @@ class DefaultArgs:
     #self.use_metric_path = None
     self.metric_tmin = 86
     self.metric_tmax = 84
+    self.metric_q = 12
     self.metric_qmin = 0
     self.metric_qmax = 20
     self.metric_denoise = 1
@@ -92,6 +92,7 @@ class DefaultArgs:
     self.extra_filter = None
 
     self.show_segments = False
+    self.print_args = False
 
     self.__dict__.update(kwargs)
 
@@ -141,26 +142,16 @@ class Queue:
       self.empty.notify()
 
 
-def replace_args(args1: List[str], args2: List[str]) -> List[str]:
-  args2_s = [arg.split("=")[0] for arg in args2]
-  new_args = [
-      arg for arg in args1
-      if not any(arg.startswith(arg2) for arg2 in args2_s)
-  ]
-  new_args += args2
-  return new_args
+def replace_args(args1: List[str], args2: List[tuple[str]]) -> List[str]:
+  new_args = args1.copy()
 
+  for c in args2:
+    if type(c) == tuple:
+      (a, b) = c
+      new_args = [b if arg == a else arg for arg in args1]
+    else:
+      new_args += [c]
 
-def get_cq(args):
-  for arg in args:
-    if arg.startswith("--cq-level="):
-      return int(arg.split("=")[1])
-  return None
-
-
-def replace_cq(args, cq):
-  new_args = [arg for arg in args if not arg.startswith("--cq-level=")]
-  new_args.append(f"--cq-level={cq}")
   return new_args
 
 
@@ -252,8 +243,9 @@ class Stats:
 
 class Worker:
 
-  def __init__(self, args, queue, passes, script, update, progress):
-    self.args = args
+  def __init__(self, args: DefaultArgs, queue, passes, script, update,
+               progress):
+    self.args: DefaultArgs = args
     self.queue = queue
     self.passes = passes
     self.script = script
@@ -270,7 +262,7 @@ class Worker:
     self.state_ev = Condition(self.state_lock)
     self.starting = False
 
-    self.current_cq = -1
+    self.current_cq = self.args.metric_q
     self.last_cq = None
     self.last_file = None
     self.change = 0
@@ -308,22 +300,16 @@ class Worker:
     self.progress.update(self.task, description=list_e(items), **kwargs)
 
   def encode(self, segment: Segment):
-    enc_args = segment.enc_args
-    if segment.args.use_metric:
-      enc_args = replace_cq(enc_args, self.current_cq)
-
-    current_cq = get_cq(enc_args)
-
     if self.args.show_segments:
       self.task = self.progress.add_task(
           list_e([
               f"{segment.n:4d}",
               f"{segment.start:5d}-{segment.end:<5d}",
-              str(current_cq),
+              str(self.current_cq),
           ]),
           total=segment.end - segment.start + 1,
       )
-      self.update_description(segment, [str(current_cq)])
+      self.update_description(segment, [str(self.current_cq)])
 
     vspipe_cmd = [
         self.args.vspipe, self.script, "-c", "y4m", "-", "-s",
@@ -335,18 +321,26 @@ class Worker:
                                   suffix=f".{self.args.segment_ext}")
 
     aomenc_cmd = [
-        self.args.aomenc, "-", f"--{self.args.segment_ext}", "-o", segment_tmp,
-        f"--passes={self.passes}"
-    ] + enc_args
+        c.replace("{out}", segment_tmp).replace("{passes}", str(self.passes))
+        for c in segment.enc_args
+    ]
+
+    if segment.args.use_metric:
+      aomenc_cmd = [c.replace("{q}", str(self.current_cq)) for c in aomenc_cmd]
+
+    #aomenc_cmd = [
+    #    self.args.aomenc, "-", f"--{self.args.segment_ext}", "-o", segment_tmp,
+    #    f"--passes={self.passes}"
+    #] + enc_args
 
     for p in range(self.passes):
-      if p == 0 and self.pass1: continue
+      if p == 0 and self.pass1 and self.passes > 1: continue
 
-      pass_cmd = aomenc_cmd + [f"--pass={p + 1}"]
+      pass_cmd = [c.replace("{pass}", str(p + 1)) for c in aomenc_cmd]
       if self.passes == 2:
         segment_fpf = os.path.join(self.args._working_dir,
                                    f"segment_{segment.n}.log")
-        pass_cmd.append(f"--fpf={segment_fpf}")
+        pass_cmd = [c.replace("{fpf}", segment_fpf) for c in pass_cmd]
         if p == 0:
           pass_cmd = [
               a for a in pass_cmd if not a.startswith("--denoise-noise-level")
@@ -355,6 +349,10 @@ class Worker:
       frame = 0
       s_output = []
       try:
+        if self.args.print_args:
+          print(" ".join(vspipe_cmd))
+          print(" ".join(pass_cmd))
+
         self.vspipe = subprocess.Popen(vspipe_cmd,
                                        stdout=subprocess.PIPE,
                                        stderr=subprocess.DEVNULL,
@@ -389,11 +387,11 @@ class Worker:
         min_score = None
 
         if self.args.show_segments:
-          self.update_description(segment,
-                                  [str(p + 1), str(current_cq)],
-                                  min_score,
-                                  test_frames,
-                                  completed=0)
+          self.update_description(
+              segment, [str(p + 1), str(self.current_cq)],
+              min_score,
+              test_frames,
+              completed=0)
 
         redo = False
 
@@ -406,24 +404,26 @@ class Worker:
           if not line: continue
 
           s_output.append(line)
+
           match = re.match(re_aom_frame, line.strip())
           if match:
-            current_pass = int(match.group(1))
-            new_frame = int(match.group(2))
+            new_frame = int(match.group(1))
             if new_frame > frame:
               if self.args.show_segments:
                 self.progress.update(self.task, advance=new_frame - frame)
 
-              if current_pass == self.passes:
+              if (p + 1) == self.passes:
                 self.update(new_frame - frame)
 
               frame = new_frame
 
-              while not self.freeze and p == 1 and test_frames and frame - test_frames[
-                  0] > 1:
+              while not self.freeze and (
+                  (p + 1) == self.passes
+              ) and test_frames and frame - test_frames[0] > 1:
                 score = gs.tester.get(segment_tmp,
                                       test_frames[0] + segment.start,
                                       test_frames[0])
+
                 if score is None:
                   break
                 test_frames.pop(0)
@@ -431,7 +431,7 @@ class Worker:
                 new_min_score = score_worst(segment.args, min_score, score)
 
                 self.update_description(
-                    segment, [str(p + 1), str(current_cq)], new_min_score,
+                    segment, [str(p + 1), str(self.current_cq)], new_min_score,
                     test_frames)
 
                 if new_min_score == min_score: continue
@@ -518,7 +518,7 @@ class Worker:
 
   def _encode(self, segment: Segment) -> bool:
     if segment.args.use_metric:
-      self.current_cq = get_cq(segment.enc_args)
+      self.current_cq = self.args.metric_q
       self.last_cq = None
       self.last_file = None
       self.change = 0
@@ -906,7 +906,6 @@ def parse_keyframe(line: str, frame: int, start: int, num_frames: int,
 
 
 def encode(args, aom_args, ranges):
-  args.aomenc = require_exec(args.aomenc)
   args.vspipe = require_exec(args.vspipe)
   args.mkvmerge = require_exec(args.mkvmerge)
 
@@ -954,7 +953,6 @@ def encode(args, aom_args, ranges):
       darkboost_path = os.path.join(os.path.dirname(args.input), filename)
     darkboost = DarkBoost(clip, darkboost_path)
 
-  print("aomenc:", args.aomenc)
   print("vspipe:", args.vspipe)
   print("mkvmerge:", args.mkvmerge)
   print("onepass_keyframes:", onepass_keyframes)
@@ -969,7 +967,7 @@ def encode(args, aom_args, ranges):
     extras.append(" ".join([
         args.use_metric,
         f"{args.metric_tmin}<{args.metric_tmax}",
-        f"{args.metric_qmin}<{get_cq(aom_args)}<{args.metric_qmax}",
+        f"{args.metric_qmin}<{args.metric_q}<{args.metric_qmax}",
     ]))
     gs.tester = Tester(args, clip)
     gs.stats = Stats(os.path.join(args._working_dir, "stats.json"))
@@ -1068,13 +1066,6 @@ def encode(args, aom_args, ranges):
               int(start_frame + segment_length * .75),
           ]
           darkboost.get(db_frames, extra_args, args.darkboost_profile)
-
-        for extra_arg in extra_args:
-          if extra_arg[0] == "cq":
-            current_cq = get_cq(segment_enc_args)
-            if cq_arg:
-              new_cq = current_cq + extra_arg[1]
-              segment_enc_args = replace_cq(segment_enc_args, new_cq)
 
         queue.submit(start_frame, end_frame - 1, segment_count[0],
                      segment_enc_args, segment_args)
@@ -1288,7 +1279,6 @@ def main():
                       action="store_true",
                       help="Do not delete temporary working directory.")
 
-  parser.add_argument("--aomenc", default="aomenc", help="Path to aomenc")
   parser.add_argument("--vspipe", default="vspipe", help="Path to vspipe")
   parser.add_argument("--mkvmerge",
                       default="mkvmerge",
