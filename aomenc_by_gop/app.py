@@ -81,7 +81,6 @@ class DefaultArgs:
 
     # bruteforce only
     self.use_metric = None
-    #self.use_metric_path = None
     self.metric_tmin = 86
     self.metric_tmax = 84
     self.metric_q = 12
@@ -180,7 +179,6 @@ class Tester:
   def __init__(self, args, clip):
     self.source_filter = args.source_filter
     self.metric = args.use_metric
-    #self.metric_path = args.use_metric_path
     self.denoise_sigma = args.metric_denoise
 
     self.clip = clip
@@ -262,7 +260,7 @@ class Worker:
     self.state_ev = Condition(self.state_lock)
     self.starting = False
 
-    self.current_cq = self.args.metric_q
+    self.current_cq = None
     self.last_cq = None
     self.last_file = None
     self.change = 0
@@ -373,7 +371,7 @@ class Worker:
 
         test_frames = None
 
-        if self.args.use_metric:
+        if segment.args.use_metric:
           test_frames = [
               0,
               int(segment_length * .1),
@@ -518,7 +516,7 @@ class Worker:
 
   def _encode(self, segment: Segment) -> bool:
     if segment.args.use_metric:
-      self.current_cq = self.args.metric_q
+      self.current_cq = segment.args.metric_q
       self.last_cq = None
       self.last_file = None
       self.change = 0
