@@ -1,25 +1,41 @@
-import argparse, json, os, platform, re, shutil, subprocess, sys, tempfile
-import time, traceback
-import vapoursynth as vs
+import argparse
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import traceback
 from collections import namedtuple
 from functools import partial
-from pkg_resources import resource_filename
-from rich.progress import Progress, BarColumn, ProgressColumn, Text, TimeElapsedColumn, TimeRemainingColumn
 from threading import Condition, Event, Lock, Thread
-from typing import Callable, List, Optional
 from types import SimpleNamespace
+from typing import Callable, List, Optional
+
+import vapoursynth as vs
+from pkg_resources import resource_filename
+from rich.progress import (
+  BarColumn,
+  Progress,
+  ProgressColumn,
+  Text,
+  TimeElapsedColumn,
+  TimeRemainingColumn,
+)
 
 re_keyframe = r"f *([0-9]+):([0|1])"
 re_aom_frame = r"Pass *[0-9]+/[0-9]+ *frame * [0-9]+/([0-9]+)"
 re_mkvmerge_track = r"Track ID ([0-9]+?): video"
 
-script_input = """import vapoursynth as vs
-clip = vs.core.{}(r\"{}\", cachefile=r\"{}\")
-{}
+script_input = """from vapoursynth import core
+clip = {clip}
+{extra}
 clip.set_output()"""
 
 script_gop = """import vapoursynth as vs
-v = vs.core.{}(r\"{}\", cachefile=r\"{}\")
+v = vs.{}
 r = v.width / v.height
 h = min(720, (v.height / 1.5) // 2 * 2)
 w = min(round(r * 720), (v.width / 1.5) // 2 * 2)
@@ -58,8 +74,7 @@ class DefaultArgs:
     self.workers = 4
     self.passes = 2
     self.kf_max_dist = 240
-    self.use = "lsmas.LWLibavSource"
-    self.source_filter_cachefile = ""
+    self.use = 'core.lsmas.LWLibavSource("{file}", cachefile="{cachefile}")'
     self.start = None
     self.end = None
     self.y = False
@@ -145,7 +160,7 @@ def replace_args(args1: List[str], args2: List[tuple[str]]) -> List[str]:
   new_args = args1.copy()
 
   for c in args2:
-    if type(c) == tuple:
+    if isinstance(c, tuple):
       (a, b) = c
       new_args = [b if arg == a else arg for arg in args1]
     else:
@@ -166,7 +181,8 @@ def list_e(items):
 
 
 def score_worst(args, a, b):
-  if a is None: return b
+  if a is None:
+    return b
 
   if args.use_metric == "butteraugli":
     return max(a, b)
@@ -177,7 +193,7 @@ def score_worst(args, a, b):
 class Tester:
 
   def __init__(self, args, clip):
-    self.source_filter = args.source_filter
+    self.use = args.use
     self.metric = args.use_metric
     self.denoise_sigma = args.metric_denoise
 
@@ -192,15 +208,18 @@ class Tester:
 
   def get(self, path, frame1, frame2):
     size = os.stat(path).st_size
-    if size == 0: return None
-
-    try:
-      distorted = self.source_filter(path, cache=0)
-    except:
+    if size == 0:
       return None
 
-    if len(distorted) < 3: return None
-    if len(distorted) <= frame2: return None
+    try:
+      distorted = eval(self.use.replace("{file}", path),{"core": vs.core})
+    except Exception:
+      return None
+
+    if len(distorted) < 3:
+      return None
+    if len(distorted) <= frame2:
+      return None
 
     with self.lock:
       ref = self.denoise(self.clip)[frame1:]
@@ -218,7 +237,7 @@ class Tester:
                                                matrix_in_s="709")
           clip = ref.ssimulacra2.SSIMULACRA2(distorted)
           return clip.get_frame(0).props["_SSIMULACRA2"]
-      except:
+      except Exception:
         return None
 
 
@@ -332,7 +351,8 @@ class Worker:
     #] + enc_args
 
     for p in range(self.passes):
-      if p == 0 and self.pass1 and self.passes > 1: continue
+      if p == 0 and self.pass1 and self.passes > 1:
+        continue
 
       pass_cmd = [c.replace("{pass}", str(p + 1)) for c in aomenc_cmd]
       if self.passes == 2:
@@ -399,7 +419,8 @@ class Worker:
           if len(line) == 0 and self.pipe.poll() is not None:
             break
 
-          if not line: continue
+          if not line:
+            continue
 
           s_output.append(line)
 
@@ -432,7 +453,8 @@ class Worker:
                     segment, [str(p + 1), str(self.current_cq)], new_min_score,
                     test_frames)
 
-                if new_min_score == min_score: continue
+                if new_min_score == min_score:
+                  continue
                 min_score = new_min_score
 
                 if self.current_cq > segment.args.metric_qmin and score_worse(
@@ -450,8 +472,9 @@ class Worker:
                   self.last_score = min_score
                   return 2
 
-          if self.freeze: break
-      except:
+          if self.freeze:
+            break
+      except Exception:
         print(traceback.format_exc())
       finally:
         self.pipe.kill()
@@ -459,7 +482,8 @@ class Worker:
 
         if self.pipe.returncode != 0:
           self.update(-frame)
-          if self.stopped: return False
+          if self.stopped:
+            return False
           if redo:
             os.remove(segment_tmp)
           elif not self.freeze:
@@ -467,7 +491,7 @@ class Worker:
               print(" ".join(vspipe_cmd), "|", " ".join(pass_cmd))
               print("\n" + "\n".join(s_output))
             return False
-
+        
         self.pipe = None
         self.vspipe = None
 
@@ -554,7 +578,8 @@ class Worker:
           gs.stats.update(segment.n, (segment.start, self.current_cq, resp[0]))
         return True
 
-      if self.stopped: return True
+      if self.stopped:
+        return True
 
     return False
 
@@ -586,7 +611,7 @@ class Worker:
 
 class FPSColumn(ProgressColumn):
 
-  def render(self, task: "Task") -> Text:
+  def render(self, task) -> Text:
     speed = task.finished_speed or task.speed
     if speed is None:
       return Text("?", style="progress.data.speed")
@@ -775,25 +800,10 @@ def get_attr(obj, attr, ex=False):
     for ns in attr.split("."):
       s = getattr(s, ns)
   except AttributeError as e:
-    if ex: raise e
+    if ex:
+      raise e
     return None
   return s
-
-
-def get_source_filter(core):
-  source_filter = get_attr(core, "lsmas.LWLibavSource")
-  if source_filter:
-    return "lsmas.LWLibavSource", source_filter
-
-  source_filter = get_attr(core, "lsmas.LSMASHVideoSource")
-  if source_filter:
-    return "lsmas.LSMASHVideoSource", source_filter
-
-  source_filter = get_attr(core, "ffms2.Source")
-  if source_filter:
-    return "ffms2.Source", source_filter
-
-  raise Exception("No source filter found")
 
 
 def require_exec(file: str, default: Optional[str] = None) -> str:
@@ -818,12 +828,6 @@ def parse_args(args) -> vs.VideoNode:
 
   core = vs.core
 
-  if args.use:
-    args.source_filter = get_attr(core, args.use, True)
-  else:
-    args.use, args.source_filter = get_source_filter(core)
-    print(f"Using {args.use} as source filter")
-
   if os.path.exists(args.output) and not args.y:
     try:
       overwrite = input(f"{args.output} already exists. Overwrite? [y/N] ")
@@ -841,8 +845,10 @@ def parse_args(args) -> vs.VideoNode:
 
   print(f"Cachefile: {args.source_filter_cachefile}")
 
-  video = args.source_filter(args.input,
-                             cachefile=args.source_filter_cachefile)
+  video = eval(args.use
+               .replace("{file}", args.input)
+               .replace("{cachefile}", args.source_filter_cachefile), 
+               {"core": core})
 
   num_frames = video.num_frames
 
@@ -875,7 +881,8 @@ def parse_keyframe(line: str, frame: int, start: int, num_frames: int,
                    offset: int, min_dist: int, max_dist: int,
                    add_job: Callable[[int, int], int]):
   match = re.match(re_keyframe, line.strip())
-  if not match: return False, frame, start, 0
+  if not match:
+    return False, frame, start, 0
 
   frame = int(match.group(1))
   if frame >= num_frames:
@@ -986,15 +993,17 @@ def encode(args, aom_args, ranges):
   script_name = os.path.join(args._working_dir, "video.vpy")
 
   with open(script_name, "w+") as script_f:
-    script_f.write(
-        script_input.format(args.use, args.input, args.source_filter_cachefile,
-                            args.extra_filter or ""))
+    script_f.write(script_input
+                   .replace("{clip}", (args.use.replace("{file}", args.input)
+                                               .replace("{cachefile}", args.source_filter_cachefile)))
+                   .replace("{extra}", args.extra_filter or "")
+    )
 
   script_name_gop = os.path.join(args._working_dir, "gop.vpy")
 
   with open(script_name_gop, "w+") as script_f:
     script_f.write(
-        script_gop.format(args.use, args.input, args.source_filter_cachefile))
+        script_gop.format(args.use.replace("{file}", args.input).replace("{cachefile}", args.source_filter_cachefile)))
 
   if args.workers <= 0:
     print("Number of workers set to 0, only getting keyframes")
@@ -1148,7 +1157,7 @@ def encode(args, aom_args, ranges):
       except KeyboardInterrupt:
         print("\nCancelled")
         graceful_exit = True
-      except:
+      except Exception:
         print(traceback.format_exc())
       finally:
         vspipe_pipe.kill()

@@ -105,7 +105,7 @@ options:
   --workers WORKERS
   --passes PASSES
   --kf-max-dist KF_MAX_DIST
-  -u USE, --use USE     VS source filter (ex. lsmas.LWLibavSource)
+  -u USE, --use USE     VS source filter (ex. core.lsmas.LWLibavSource("{file}", cachefile="{cachefile}"))
   -s START, --start START
                         Input start frame
   -e END, --end END     Input end frame
